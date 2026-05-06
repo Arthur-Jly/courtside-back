@@ -82,7 +82,9 @@ module.exports = function(db) {
       if (data.status === 'OK' && data.predictions) {
         const suggestions = data.predictions.slice(0, 8).map(p => ({
           description: p.description,
-          placeId: p.place_id
+          placeId: p.place_id,
+          mainText: p.structured_formatting?.main_text || p.description,
+          secondaryText: p.structured_formatting?.secondary_text || '',
         }));
         
         return res.json({
@@ -101,6 +103,44 @@ module.exports = function(db) {
         success: false,
         error: 'Autocomplete service error'
       });
+    }
+  });
+
+  /**
+   * GET /api/geocode/place?placeId=ChIJ...
+   * Géocode un placeId Google vers des coordonnées
+   */
+  router.get('/geocode/place', async (req, res) => {
+    const { placeId } = req.query;
+
+    if (!placeId) {
+      return res.status(400).json({ error: 'placeId is required' });
+    }
+
+    try {
+      const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
+
+      if (!GOOGLE_MAPS_API_KEY) {
+        return res.status(500).json({ error: 'Google Maps API key not configured' });
+      }
+
+      const url = `https://maps.googleapis.com/maps/api/geocode/json?place_id=${encodeURIComponent(placeId)}&key=${GOOGLE_MAPS_API_KEY}`;
+      const response = await axios.get(url);
+      const data = response.data;
+
+      if (data.status === 'OK' && data.results?.length > 0) {
+        const coords = data.results[0].geometry.location;
+        return res.json({
+          success: true,
+          lat: coords.lat,
+          lng: coords.lng,
+          formattedAddress: data.results[0].formatted_address,
+        });
+      }
+      return res.status(404).json({ success: false, error: 'Place not found' });
+    } catch (error) {
+      console.error('Place geocoding error:', error);
+      return res.status(500).json({ success: false, error: 'Geocoding service error' });
     }
   });
 
