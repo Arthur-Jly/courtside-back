@@ -36,7 +36,8 @@ const schemas = {
     name: Joi.string().min(2).max(100).required(),
     email: Joi.string().email().required(),
     password: Joi.string().min(6).max(100).required(),
-    role: Joi.string().valid('user', 'club_owner', 'admin').required()
+    role: Joi.string().valid('player', 'club_admin').required(),
+    club_name: Joi.string().max(200).optional()
   }),
 
   login: Joi.object({

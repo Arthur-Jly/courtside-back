@@ -1,22 +1,20 @@
-// Charger les variables d'environnement depuis .env
 require('dotenv').config();
 
 const express = require('express');
 const mysql = require('mysql2');
 const cors = require('cors');
-const JWT_SECRET = process.env.JWT_SECRET || 'votre_secret_jwt'; 
+const { httpLogger } = require('./utils/logger');
+const { errorHandler } = require('./middleware/errorHandler');
+
+const JWT_SECRET = process.env.JWT_SECRET || 'votre_secret_jwt';
+const PORT = process.env.PORT || 3001;
 
 const app = express();
-const port = 3001;
 
 app.use(express.json());
 app.use(cors());
-
+app.use(httpLogger);
 app.use('/uploads', express.static(require('path').join(__dirname, '..', 'uploads')));
-app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} -> ${req.method} ${req.url}`);
-  next();
-});
 
 // health check
 app.get('/health', (req, res) => {
@@ -72,8 +70,10 @@ app.use('/api', financesRouter);
 app.use('/api', announcementsRouter);
 app.use('/api', paymentsRouter);
 
-app.listen(port, () => {
-  console.log(`Serveur API Sport à l'écoute sur le port ${port}`);
+app.use(errorHandler);
+
+app.listen(PORT, () => {
+  console.log(`Serveur API Sport à l'écoute sur le port ${PORT}`);
 });
 
 // Arrêter gracieusement les cron jobs lors de l'arrêt du serveur
