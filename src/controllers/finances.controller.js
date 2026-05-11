@@ -37,12 +37,6 @@ module.exports = function(db) {
 
       const startDateStr = startDate.toISOString().slice(0, 10);
       const endDateStr = endDate.toISOString().slice(0, 10);
-      
-      console.log('=== FINANCES DEBUG ===');
-      console.log('Period:', period);
-      console.log('Target Date:', targetDate);
-      console.log('Start Date:', startDateStr);
-      console.log('End Date:', endDateStr);
 
       // Get all reservations with prices for the club in the period
       const [reservations] = await pool.query(`

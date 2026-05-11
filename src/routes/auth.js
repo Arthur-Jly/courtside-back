@@ -31,7 +31,7 @@ module.exports = (db, jwtSecret) => {
     );
 
     const user = await queryOne(db, 'SELECT id, name, email, role, club_id FROM users WHERE id = ?', [userId]);
-    const token = jwt.sign({ id: user.id, role: user.role, name: user.name }, jwtSecret, { expiresIn: '2h' });
+    const token = jwt.sign({ id: user.id, role: user.role, name: user.name, club_id: user.club_id }, jwtSecret, { expiresIn: '2h' });
 
     logger.info(`Nouvel utilisateur inscrit: ${email}`);
     res.json({ ...user, token });
@@ -46,7 +46,7 @@ module.exports = (db, jwtSecret) => {
     const match = await bcrypt.compare(password, user.password_hash);
     if (!match) throw new UnauthorizedError('Email ou mot de passe incorrect.');
 
-    const token = jwt.sign({ id: user.id, role: user.role, name: user.name }, jwtSecret, { expiresIn: '2h' });
+    const token = jwt.sign({ id: user.id, role: user.role, name: user.name, club_id: user.club_id }, jwtSecret, { expiresIn: '2h' });
 
     logger.info(`Utilisateur connecté: ${email}`);
     res.json({ id: user.id, name: user.name, email: user.email, role: user.role, club_id: user.club_id, token });

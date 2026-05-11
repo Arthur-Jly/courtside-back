@@ -1,4 +1,5 @@
 const express = require('express');
+const { requireAuth, requireClubAdmin } = require('../middleware/auth');
 
 module.exports = function(db){
 	const router = express.Router();
@@ -10,29 +11,19 @@ module.exports = function(db){
 	// public: list slots for a club
 	router.get('/clubs/:id/slots', controller.listSlotsByClub);
 
-	// book a slot
-	router.post('/slots/:id/book', controller.bookSlot);
+	// book a slot (requires auth)
+	router.post('/slots/:id/book', requireAuth, controller.bookSlot);
 
-	// cancel reservation
-	router.post('/reservations/:id/cancel', controller.cancelReservation);
+	// cancel reservation (requires auth)
+	router.post('/reservations/:id/cancel', requireAuth, controller.cancelReservation);
 
-	// admin: generate slots
-	router.post('/admin/generate-slots', controller.adminGenerateSlots);
-
-	// admin: generate slots for a single terrain
-	router.post('/admin/generate-slots/terrain', controller.adminGenerateSlotsForTerrain);
-
-	// admin: generate slots for all terrains of a club
-	router.post('/admin/generate-slots/club', controller.adminGenerateSlotsForClub);
-
-	// admin: cleanup old slots
-	router.delete('/admin/slots/cleanup', controller.adminCleanupSlots);
-
-	// admin: remove duplicate slots
-	router.post('/admin/remove-duplicate-slots', controller.adminRemoveDuplicateSlots);
-
-	// admin: truncate slots table
-	router.post('/admin/truncate-slots', controller.adminTruncateSlots);
+	// admin routes (require auth + club_admin role)
+	router.post('/admin/generate-slots', requireAuth, requireClubAdmin, controller.adminGenerateSlots);
+	router.post('/admin/generate-slots/terrain', requireAuth, requireClubAdmin, controller.adminGenerateSlotsForTerrain);
+	router.post('/admin/generate-slots/club', requireAuth, requireClubAdmin, controller.adminGenerateSlotsForClub);
+	router.delete('/admin/slots/cleanup', requireAuth, requireClubAdmin, controller.adminCleanupSlots);
+	router.post('/admin/remove-duplicate-slots', requireAuth, requireClubAdmin, controller.adminRemoveDuplicateSlots);
+	router.post('/admin/truncate-slots', requireAuth, requireClubAdmin, controller.adminTruncateSlots);
 
 	return router;
 };

@@ -3,6 +3,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const ClubsController = require('../controllers/clubs.controller');
+const { requireAuth, requireClubAdmin } = require('../middleware/auth');
 
 // Configuration de multer pour l'upload d'images
 const storage = multer.diskStorage({
@@ -140,7 +141,7 @@ module.exports = (db) => {
    * GET /api/clubs/:id/kpis
    * Retourne les KPIs du club pour le dashboard admin
    */
-  router.get('/clubs/:id/kpis', (req, res) => {
+  router.get('/clubs/:id/kpis', requireAuth, requireClubAdmin, (req, res) => {
     const { id } = req.params;
     const pool = (db && typeof db.promise === 'function') ? db.promise() : db;
 
@@ -309,7 +310,7 @@ module.exports = (db) => {
    * Ajoute un sport à un club
    * Body: { sportName: string }
    */
-  router.post('/clubs/:id/sports', async (req, res) => {
+  router.post('/clubs/:id/sports', requireAuth, requireClubAdmin, async (req, res) => {
     try {
       const { id } = req.params;
       const { sportName } = req.body;
@@ -339,7 +340,7 @@ module.exports = (db) => {
    * DELETE /api/clubs/:id/sports/:sportName
    * Supprime un sport d'un club
    */
-  router.delete('/clubs/:id/sports/:sportName', async (req, res) => {
+  router.delete('/clubs/:id/sports/:sportName', requireAuth, requireClubAdmin, async (req, res) => {
     try {
       const { id, sportName } = req.params;
 
@@ -360,7 +361,7 @@ module.exports = (db) => {
    * Crée un nouveau terrain
    * Body: { name, sport_type, price_per_hour, slot_duration, recurring_availabilities }
    */
-  router.post('/clubs/:id/terrains', async (req, res) => {
+  router.post('/clubs/:id/terrains', requireAuth, requireClubAdmin, async (req, res) => {
     try {
       const { id } = req.params;
       const { name, sport_type, price_per_hour, slot_duration, recurring_availabilities } = req.body;
@@ -393,7 +394,7 @@ module.exports = (db) => {
    * Met à jour un terrain
    * Body: { name, sport_type, price_per_hour, slot_duration, recurring_availabilities }
    */
-  router.put('/clubs/:clubId/terrains/:terrainId', async (req, res) => {
+  router.put('/clubs/:clubId/terrains/:terrainId', requireAuth, requireClubAdmin, async (req, res) => {
     try {
       const { terrainId } = req.params;
       const { name, sport_type, price_per_hour, slot_duration, recurring_availabilities } = req.body;
@@ -424,7 +425,7 @@ module.exports = (db) => {
    * DELETE /api/clubs/:clubId/terrains/:terrainId
    * Supprime un terrain
    */
-  router.delete('/clubs/:clubId/terrains/:terrainId', async (req, res) => {
+  router.delete('/clubs/:clubId/terrains/:terrainId', requireAuth, requireClubAdmin, async (req, res) => {
     try {
       const { terrainId } = req.params;
 
@@ -441,19 +442,12 @@ module.exports = (db) => {
   });
 
   /**
-   * GET /api/db-status
-   * Vérifie le statut de la base de données
+   * GET /api/db-status (internal health check — auth required)
    */
-  router.get('/db-status', (req, res) => {
+  router.get('/db-status', requireAuth, (req, res) => {
     db.query('SELECT 1 AS ok', (err) => {
-      if (err) return res.status(500).json({ status: 'error', message: 'DB unreachable', details: err });
-      db.query('SELECT COUNT(*) AS clubs FROM clubs', (err, clubRows) => {
-        if (err) return res.status(500).json({ status: 'error', message: 'Cannot count clubs', details: err });
-        db.query('SELECT COUNT(*) AS users FROM users', (err, userRows) => {
-          if (err) return res.status(500).json({ status: 'error', message: 'Cannot count users', details: err });
-          res.json({ status: 'ok', clubs: clubRows[0].clubs, users: userRows[0].users });
-        });
-      });
+      if (err) return res.status(500).json({ status: 'error', message: 'DB unreachable' });
+      res.json({ status: 'ok' });
     });
   });
 
@@ -481,7 +475,7 @@ module.exports = (db) => {
    * Ajoute une ou plusieurs images à un terrain
    * Multipart form-data avec le champ "images"
    */
-  router.post('/clubs/:clubId/terrains/:terrainId/images', upload.array('images', 10), async (req, res) => {
+  router.post('/clubs/:clubId/terrains/:terrainId/images', requireAuth, requireClubAdmin, upload.array('images', 10), async (req, res) => {
     try {
       const { terrainId } = req.params;
       
@@ -531,7 +525,7 @@ module.exports = (db) => {
    * DELETE /api/clubs/:clubId/terrains/:terrainId/images/:imageId
    * Supprime une image d'un terrain
    */
-  router.delete('/clubs/:clubId/terrains/:terrainId/images/:imageId', async (req, res) => {
+  router.delete('/clubs/:clubId/terrains/:terrainId/images/:imageId', requireAuth, requireClubAdmin, async (req, res) => {
     try {
       const { imageId } = req.params;
       
@@ -590,7 +584,7 @@ module.exports = (db) => {
    * Met à jour les informations de base d'un club
    * Body: { name, description, address, city, postal_code, phone, email, website }
    */
-  router.put('/clubs/:id/info', async (req, res) => {
+  router.put('/clubs/:id/info', requireAuth, requireClubAdmin, async (req, res) => {
     try {
       const { id } = req.params;
       const { name, description, address, city, postal_code, phone, email, website } = req.body;
@@ -614,7 +608,7 @@ module.exports = (db) => {
    * Met à jour les horaires d'ouverture d'un club
    * Body: { hours: [{day_of_week, open_time, close_time, is_closed}] }
    */
-  router.put('/clubs/:id/opening-hours', async (req, res) => {
+  router.put('/clubs/:id/opening-hours', requireAuth, requireClubAdmin, async (req, res) => {
     try {
       const { id } = req.params;
       const { hours } = req.body;
@@ -640,7 +634,7 @@ module.exports = (db) => {
    * Met à jour les réseaux sociaux d'un club
    * Body: { socials: [{type, url}] }
    */
-  router.put('/clubs/:id/socials', async (req, res) => {
+  router.put('/clubs/:id/socials', requireAuth, requireClubAdmin, async (req, res) => {
     try {
       const { id } = req.params;
       const { socials } = req.body;
@@ -666,7 +660,7 @@ module.exports = (db) => {
    * Met à jour les moyens de paiement d'un club
    * Body: { methods: ['CB', 'Stripe', 'PayPal'] }
    */
-  router.put('/clubs/:id/payment-methods', async (req, res) => {
+  router.put('/clubs/:id/payment-methods', requireAuth, requireClubAdmin, async (req, res) => {
     try {
       const { id } = req.params;
       const { methods } = req.body;

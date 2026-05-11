@@ -1,4 +1,5 @@
 const AnnouncementsController = require('../controllers/announcements.controller');
+const { requireAuth, optionalAuth } = require('../middleware/auth');
 
 module.exports = function(db) {
   const express = require('express');
@@ -83,10 +84,10 @@ module.exports = function(db) {
    * Récupère une annonce spécifique par son ID
    * Headers: user-id (optionnel pour vérifier l'accès aux annonces privées)
    */
-  router.get('/announcements/:id', async (req, res) => {
+  router.get('/announcements/:id', optionalAuth, async (req, res) => {
     try {
       const { id } = req.params;
-      const userId = req.headers['user-id'] ? parseInt(req.headers['user-id']) : null;
+      const userId = req.user?.id ?? null;
       
       const announcement = await controller.getAnnouncementById(parseInt(id), userId);
       
@@ -112,9 +113,9 @@ module.exports = function(db) {
    * Crée une nouvelle annonce
    * Body: { sport_type, terrain_id?, slot_start, slot_end, places_total, description?, created_by, visibility? }
    */
-  router.post('/announcements', async (req, res) => {
+  router.post('/announcements', requireAuth, async (req, res) => {
     try {
-      const announcementData = req.body;
+      const announcementData = { ...req.body, created_by: req.user.id };
       const announcement = await controller.createAnnouncement(announcementData);
       
       res.status(201).json({ 
@@ -141,15 +142,11 @@ module.exports = function(db) {
    * Body: { description?, status?, slot_start?, slot_end? }
    * Headers: user-id (requis)
    */
-  router.put('/announcements/:id', async (req, res) => {
+  router.put('/announcements/:id', requireAuth, async (req, res) => {
     try {
       const { id } = req.params;
-      const userId = parseInt(req.headers['user-id']);
+      const userId = req.user.id;
       const updateData = req.body;
-
-      if (!userId) {
-        return res.status(401).json({ error: 'User ID requis' });
-      }
       
       const announcement = await controller.updateAnnouncement(parseInt(id), userId, updateData);
       
@@ -180,14 +177,10 @@ module.exports = function(db) {
    * Annule une annonce (met le status à 'cancelled')
    * Headers: user-id (requis)
    */
-  router.delete('/announcements/:id', async (req, res) => {
+  router.delete('/announcements/:id', requireAuth, async (req, res) => {
     try {
       const { id } = req.params;
-      const userId = parseInt(req.headers['user-id']);
-
-      if (!userId) {
-        return res.status(401).json({ error: 'User ID requis' });
-      }
+      const userId = req.user.id;
       
       const announcement = await controller.cancelAnnouncement(parseInt(id), userId);
       
@@ -216,14 +209,10 @@ module.exports = function(db) {
    * Rejoindre une annonce publique
    * Headers: user-id (requis)
    */
-  router.post('/announcements/:id/join', async (req, res) => {
+  router.post('/announcements/:id/join', requireAuth, async (req, res) => {
     try {
       const { id } = req.params;
-      const userId = parseInt(req.headers['user-id']);
-
-      if (!userId) {
-        return res.status(401).json({ error: 'User ID requis' });
-      }
+      const userId = req.user.id;
       
       const result = await controller.addParticipant(parseInt(id), userId, 'participant');
       
@@ -254,14 +243,10 @@ module.exports = function(db) {
    * Quitter une annonce
    * Headers: user-id (requis)
    */
-  router.delete('/announcements/:id/leave', async (req, res) => {
+  router.delete('/announcements/:id/leave', requireAuth, async (req, res) => {
     try {
       const { id } = req.params;
-      const userId = parseInt(req.headers['user-id']);
-
-      if (!userId) {
-        return res.status(401).json({ error: 'User ID requis' });
-      }
+      const userId = req.user.id;
       
       const result = await controller.removeParticipant(parseInt(id), userId);
       
@@ -288,15 +273,11 @@ module.exports = function(db) {
    * Body: { userIds: [1, 2, 3] }
    * Headers: user-id (requis)
    */
-  router.post('/announcements/:id/invite', async (req, res) => {
+  router.post('/announcements/:id/invite', requireAuth, async (req, res) => {
     try {
       const { id } = req.params;
-      const userId = parseInt(req.headers['user-id']);
+      const userId = req.user.id;
       const { userIds } = req.body;
-
-      if (!userId) {
-        return res.status(401).json({ error: 'User ID requis' });
-      }
 
       if (!userIds || !Array.isArray(userIds) || userIds.length === 0) {
         return res.status(400).json({ error: 'userIds requis et doit être un tableau' });
@@ -358,15 +339,11 @@ module.exports = function(db) {
    * Body: { response: 'accepted' | 'declined' }
    * Headers: user-id (requis)
    */
-  router.put('/invitations/:id/respond', async (req, res) => {
+  router.put('/invitations/:id/respond', requireAuth, async (req, res) => {
     try {
       const { id } = req.params;
       const { response } = req.body;
-      const userId = parseInt(req.headers['user-id']);
-
-      if (!userId) {
-        return res.status(401).json({ error: 'User ID requis' });
-      }
+      const userId = req.user.id;
 
       if (!response || !['accepted', 'declined'].includes(response)) {
         return res.status(400).json({ error: 'Réponse invalide. Utilisez "accepted" ou "declined"' });
@@ -396,14 +373,10 @@ module.exports = function(db) {
    * Accepter une invitation
    * Headers: user-id (requis)
    */
-  router.put('/invitations/:id/accept', async (req, res) => {
+  router.put('/invitations/:id/accept', requireAuth, async (req, res) => {
     try {
       const { id } = req.params;
-      const userId = parseInt(req.headers['user-id']);
-
-      if (!userId) {
-        return res.status(401).json({ error: 'User ID requis' });
-      }
+      const userId = req.user.id;
       
       const result = await controller.acceptInvitation(parseInt(id), userId);
       
@@ -429,14 +402,10 @@ module.exports = function(db) {
    * Refuser une invitation
    * Headers: user-id (requis)
    */
-  router.put('/invitations/:id/decline', async (req, res) => {
+  router.put('/invitations/:id/decline', requireAuth, async (req, res) => {
     try {
       const { id } = req.params;
-      const userId = parseInt(req.headers['user-id']);
-
-      if (!userId) {
-        return res.status(401).json({ error: 'User ID requis' });
-      }
+      const userId = req.user.id;
       
       const result = await controller.declineInvitation(parseInt(id), userId);
       
@@ -483,14 +452,10 @@ module.exports = function(db) {
    * Valider une annonce et créer la réservation payante
    * Headers: user-id (requis)
    */
-  router.post('/announcements/:id/validate', async (req, res) => {
+  router.post('/announcements/:id/validate', requireAuth, async (req, res) => {
     try {
       const { id } = req.params;
-      const userId = parseInt(req.headers['user-id']);
-
-      if (!userId) {
-        return res.status(401).json({ error: 'User ID requis' });
-      }
+      const userId = req.user.id;
       
       const result = await controller.validateAnnouncement(parseInt(id), userId);
       

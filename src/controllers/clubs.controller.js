@@ -31,24 +31,18 @@ class ClubsController {
     let datagouvClubs = [];
     if (includeDatagouv && lat && lon) {
       try {
-        console.log('[ClubsController] Recherche équipements data.gouv.fr avec:', { lat, lon, sport, radius });
         const equipements = await datagouvApi.searchEquipements({
           lat,
           lon,
           sport,
-          radius: radius || 50, // 50km par défaut, la pagination permet de tout récupérer
-          limit: Math.max(20, limit - dbClubs.length), // Compléter jusqu'à la limite
+          radius: radius || 50,
+          limit: Math.max(20, limit - dbClubs.length),
         });
-        
-        // Transformer les équipements en format club
-        datagouvClubs = equipements.map(eq => 
+        datagouvClubs = equipements.map(eq =>
           datagouvApi.transformEquipementToClub(eq, lat, lon)
         );
-        
-        console.log(`[ClubsController] ${datagouvClubs.length} équipements data.gouv trouvés`);
-      } catch (error) {
-        console.error('[ClubsController] Erreur data.gouv (non bloquante):', error.message);
-        // On continue avec seulement les clubs BDD
+      } catch {
+        // non-blocking: continue with DB clubs only
       }
     }
     
@@ -60,13 +54,6 @@ class ClubsController {
       allClubs = allClubs.filter(c => String(c.city || '').toLowerCase().includes(cityLower));
     }
     
-    console.log(`[ClubsController] Total avant fusion: ${dbClubs.length} clubs BDD + ${datagouvClubs.length} data.gouv = ${allClubs.length}`);
-    
-    // Debug: afficher un exemple d'équipement data.gouv
-    if (datagouvClubs.length > 0) {
-      console.log('[ClubsController] Exemple équipement data.gouv:', JSON.stringify(datagouvClubs[0], null, 2));
-    }
-    
     // Trier par distance si disponible, sinon garder l'ordre
     if (lat && lon) {
       allClubs.sort((a, b) => {
@@ -76,11 +63,7 @@ class ClubsController {
       });
     }
     
-    // Limiter le nombre total de résultats
-    const finalResults = allClubs.slice(0, parseInt(limit, 10));
-    console.log(`[ClubsController] Retour de ${finalResults.length} résultats au frontend`);
-    
-    return finalResults;
+    return allClubs.slice(0, parseInt(limit, 10));
   }
 
   /**

@@ -1,8 +1,10 @@
 const express = require('express');
 const multer = require('multer');
 const path = require('path');
+const { requireAuth } = require('../middleware/auth');
+const { asyncHandler } = require('../middleware/errorHandler');
+const { queryPromise, queryOne, insert } = require('../utils/dbHelpers');
 
-// Configurer le dossier d'upload
 const upload = multer({
   storage: multer.diskStorage({
     destination: (req, file, cb) => {
@@ -18,59 +20,56 @@ const upload = multer({
 module.exports = (db) => {
   const router = express.Router();
 
-  // d. Récupérer la liste des chats d'un user avec infos complètes
-  router.get('/chats', (req, res) => {
-    const { user_id } = req.query;
-    if (!user_id) {
-      return res.status(400).json({ error: 'user_id required' });
-    }
+  // List chats for the authenticated user
+  router.get('/chats', requireAuth, asyncHandler(async (req, res) => {
+    const userId = req.user.id;
     const sql = `
-      SELECT 
-        c.id, 
-        c.type, 
-        c.created_at, 
+      SELECT
+        c.id,
+        c.type,
+        c.created_at,
         c.closed_at,
-        CASE 
+        CASE
           WHEN c.type = 'private' THEN (
-            SELECT u.name 
-            FROM chat_participants cp2 
-            JOIN users u ON cp2.user_id = u.id 
+            SELECT u.name
+            FROM chat_participants cp2
+            JOIN users u ON cp2.user_id = u.id
             WHERE cp2.chat_id = c.id AND cp2.user_id != ?
             LIMIT 1
           )
           ELSE c.name
         END as display_name,
-        CASE 
+        CASE
           WHEN c.type = 'private' THEN (
             SELECT u.avatar
-            FROM chat_participants cp2 
-            JOIN users u ON cp2.user_id = u.id 
+            FROM chat_participants cp2
+            JOIN users u ON cp2.user_id = u.id
             WHERE cp2.chat_id = c.id AND cp2.user_id != ?
             LIMIT 1
           )
           ELSE NULL
         END as avatar,
         (
-          SELECT m.content 
-          FROM messages m 
-          WHERE m.chat_id = c.id 
-          ORDER BY m.created_at DESC 
+          SELECT m.content
+          FROM messages m
+          WHERE m.chat_id = c.id
+          ORDER BY m.created_at DESC
           LIMIT 1
         ) as lastMessage,
         (
-          SELECT m.created_at 
-          FROM messages m 
-          WHERE m.chat_id = c.id 
-          ORDER BY m.created_at DESC 
+          SELECT m.created_at
+          FROM messages m
+          WHERE m.chat_id = c.id
+          ORDER BY m.created_at DESC
           LIMIT 1
         ) as lastMessageTime,
         (
-          SELECT COUNT(*) 
-          FROM messages m 
-          WHERE m.chat_id = c.id 
-          AND m.sender_id != ? -- Seuls les messages reçus
+          SELECT COUNT(*)
+          FROM messages m
+          WHERE m.chat_id = c.id
+          AND m.sender_id != ?
           AND m.created_at > COALESCE(
-            (SELECT last_read_at FROM chat_participants WHERE chat_id = c.id AND user_id = ?), 
+            (SELECT last_read_at FROM chat_participants WHERE chat_id = c.id AND user_id = ?),
             '1970-01-01'
           )
         ) as unreadCount
@@ -78,18 +77,16 @@ module.exports = (db) => {
       JOIN chat_participants cp ON c.id = cp.chat_id
       WHERE cp.user_id = ?
       ORDER BY COALESCE(
-        (SELECT MAX(created_at) FROM messages WHERE chat_id = c.id), 
+        (SELECT MAX(created_at) FROM messages WHERE chat_id = c.id),
         c.created_at
       ) DESC
     `;
-    db.query(sql, [user_id, user_id, user_id, user_id, user_id], (err, chats) => {
-      if (err) return res.status(500).json({ error: err });
-      res.json(chats);
-    });
-  });
+    const chats = await queryPromise(db, sql, [userId, userId, userId, userId, userId]);
+    res.json(chats);
+  }));
 
-  // b. Récupérer les messages d'un chat
-  router.get('/chats/:chat_id/messages', (req, res) => {
+  // Get messages for a chat
+  router.get('/chats/:chat_id/messages', requireAuth, asyncHandler(async (req, res) => {
     const { chat_id } = req.params;
     const sql = `
       SELECT m.id, m.sender_id, u.name as sender_name, m.content, m.created_at, m.file_url, m.file_type,
@@ -99,27 +96,18 @@ module.exports = (db) => {
       WHERE m.chat_id = ?
       ORDER BY m.created_at ASC
     `;
-    db.query(sql, [chat_id], (err, messages) => {
-      if (err) return res.status(500).json({ error: err });
-      
-      // Parser le metadata JSON pour chaque message
-      const parsedMessages = messages.map(msg => {
-        if (msg.metadata && typeof msg.metadata === 'string') {
-          try {
-            msg.metadata = JSON.parse(msg.metadata);
-          } catch (e) {
-            console.error('Erreur parsing metadata:', e);
-          }
-        }
-        return msg;
-      });
-      
-      res.json(parsedMessages);
+    const messages = await queryPromise(db, sql, [chat_id]);
+    const parsed = messages.map(msg => {
+      if (msg.metadata && typeof msg.metadata === 'string') {
+        try { msg.metadata = JSON.parse(msg.metadata); } catch { /* keep raw */ }
+      }
+      return msg;
     });
-  });
+    res.json(parsed);
+  }));
 
-  // e. Récupérer les participants d'un chat
-  router.get('/chats/:chat_id/participants', (req, res) => {
+  // Get participants of a chat
+  router.get('/chats/:chat_id/participants', requireAuth, asyncHandler(async (req, res) => {
     const { chat_id } = req.params;
     const sql = `
       SELECT cp.user_id, cp.role, cp.joined_at, u.name, u.email, u.avatar
@@ -127,139 +115,84 @@ module.exports = (db) => {
       JOIN users u ON cp.user_id = u.id
       WHERE cp.chat_id = ?
     `;
-    db.query(sql, [chat_id], (err, participants) => {
-      if (err) return res.status(500).json({ error: err });
-      res.json(participants);
-    });
-  });
+    const participants = await queryPromise(db, sql, [chat_id]);
+    res.json(participants);
+  }));
 
-  // f. Marquer les messages comme lus
-  router.post('/chats/:chat_id/mark-read', (req, res) => {
+  // Mark messages as read
+  router.post('/chats/:chat_id/mark-read', requireAuth, asyncHandler(async (req, res) => {
     const { chat_id } = req.params;
-    const { user_id } = req.body;
-    if (!user_id) {
-      return res.status(400).json({ error: 'user_id required' });
-    }
-    const sql = `
-      UPDATE chat_participants 
-      SET last_read_at = NOW() 
-      WHERE chat_id = ? AND user_id = ?
-    `;
-    db.query(sql, [chat_id, user_id], (err, result) => {
-      if (err) return res.status(500).json({ error: err });
-      res.json({ success: true });
-    });
-  });
+    const userId = req.user.id;
+    await queryPromise(db,
+      'UPDATE chat_participants SET last_read_at = NOW() WHERE chat_id = ? AND user_id = ?',
+      [chat_id, userId]
+    );
+    res.json({ success: true });
+  }));
 
-  // g. Supprimer une discussion pour un utilisateur
-  router.delete('/chats/:chat_id', (req, res) => {
+  // Delete / leave a chat
+  router.delete('/chats/:chat_id', requireAuth, asyncHandler(async (req, res) => {
     const { chat_id } = req.params;
-    const { user_id } = req.body;
-    if (!user_id) {
-      return res.status(400).json({ error: 'user_id required' });
+    const userId = req.user.id;
+    await queryPromise(db,
+      'DELETE FROM chat_participants WHERE chat_id = ? AND user_id = ?',
+      [chat_id, userId]
+    );
+    const remaining = await queryOne(db,
+      'SELECT COUNT(*) as count FROM chat_participants WHERE chat_id = ?',
+      [chat_id]
+    );
+    if (remaining.count === 0) {
+      await queryPromise(db, 'DELETE FROM messages WHERE chat_id = ?', [chat_id]);
+      await queryPromise(db, 'DELETE FROM chats WHERE id = ?', [chat_id]);
+      return res.json({ success: true, message: 'Chat complètement supprimé' });
     }
-    
-    // Option 1: Supprimer seulement la participation de l'utilisateur
-    const sql = `
-      DELETE FROM chat_participants 
-      WHERE chat_id = ? AND user_id = ?
-    `;
-    db.query(sql, [chat_id, user_id], (err, result) => {
-      if (err) return res.status(500).json({ error: err });
-      
-      // Vérifier s'il reste des participants
-      db.query('SELECT COUNT(*) as count FROM chat_participants WHERE chat_id = ?', [chat_id], (err2, rows) => {
-        if (err2) return res.status(500).json({ error: err2 });
-        
-        // Si plus de participants, supprimer le chat complètement
-        if (rows[0].count === 0) {
-          db.query('DELETE FROM messages WHERE chat_id = ?', [chat_id], (err3) => {
-            if (err3) return res.status(500).json({ error: err3 });
-            db.query('DELETE FROM chats WHERE id = ?', [chat_id], (err4) => {
-              if (err4) return res.status(500).json({ error: err4 });
-              res.json({ success: true, message: 'Chat complètement supprimé' });
-            });
-          });
-        } else {
-          res.json({ success: true, message: 'Utilisateur retiré du chat' });
-        }
-      });
-    });
-  });
+    res.json({ success: true, message: 'Utilisateur retiré du chat' });
+  }));
 
-  // a. Créer ou retrouver un chat entre deux amis
-  router.post('/chats', (req, res) => {
-    const { user_id_1, user_id_2 } = req.body;
-    if (!user_id_1 || !user_id_2) {
-      return res.status(400).json({ error: 'user_id_1 and user_id_2 required' });
+  // Create or find an existing private chat between two users
+  router.post('/chats', requireAuth, asyncHandler(async (req, res) => {
+    const userId1 = req.user.id;
+    const { user_id_2 } = req.body;
+    if (!user_id_2) {
+      return res.status(400).json({ error: 'user_id_2 required' });
     }
-    // Vérifier si un chat privé existe déjà
-    const checkSql = `
+    const existing = await queryOne(db, `
       SELECT * FROM chats
       WHERE type = 'private'
-        AND (
-          (id IN (SELECT chat_id FROM chat_participants WHERE user_id = ?) )
-          AND (id IN (SELECT chat_id FROM chat_participants WHERE user_id = ?) )
-        )
+        AND id IN (SELECT chat_id FROM chat_participants WHERE user_id = ?)
+        AND id IN (SELECT chat_id FROM chat_participants WHERE user_id = ?)
       LIMIT 1
-    `;
-    db.query(checkSql, [user_id_1, user_id_2], (err, chats) => {
-      if (err) return res.status(500).json({ error: err });
-      if (chats.length > 0) {
-        return res.json(chats[0]);
-      }
-      // Créer le chat
-      db.query(
-        "INSERT INTO chats (type, created_at) VALUES ('private', NOW())",
-        (err, result) => {
-          if (err) return res.status(500).json({ error: err });
-          const chat_id = result.insertId;
-          // Ajouter les deux participants
-          const partSql = `
-            INSERT INTO chat_participants (chat_id, user_id, role, joined_at, last_read_at)
-            VALUES (?, ?, 'member', NOW(), NOW()), (?, ?, 'member', NOW(), NOW())
-          `;
-          db.query(partSql, [chat_id, user_id_1, chat_id, user_id_2], (err2) => {
-            if (err2) return res.status(500).json({ error: err2 });
-            db.query("SELECT * FROM chats WHERE id = ?", [chat_id], (err3, rows) => {
-              if (err3) return res.status(500).json({ error: err3 });
-              res.json(rows[0]);
-            });
-          });
-        }
-      );
-    });
-  });
+    `, [userId1, user_id_2]);
+    if (existing) return res.json(existing);
 
-  // c. Envoyer un message (texte ou fichier)
-  router.post('/chats/:chat_id/messages', upload.single('file'), (req, res) => {
+    const chatId = await insert(db,
+      "INSERT INTO chats (type, created_at) VALUES ('private', NOW())"
+    );
+    await queryPromise(db, `
+      INSERT INTO chat_participants (chat_id, user_id, role, joined_at, last_read_at)
+      VALUES (?, ?, 'member', NOW(), NOW()), (?, ?, 'member', NOW(), NOW())
+    `, [chatId, userId1, chatId, user_id_2]);
+    const chat = await queryOne(db, 'SELECT * FROM chats WHERE id = ?', [chatId]);
+    res.json(chat);
+  }));
+
+  // Send a message (text or file)
+  router.post('/chats/:chat_id/messages', requireAuth, upload.single('file'), asyncHandler(async (req, res) => {
     const { chat_id } = req.params;
-    const { sender_id, content, file_type } = req.body;
-    let file_url = null;
+    const senderId = req.user.id;
+    const { content, file_type } = req.body;
+    const file_url = req.file ? `/uploads/${req.file.filename}` : null;
 
-    // Si un fichier est uploadé, construire l'URL
-    if (req.file) {
-      // À adapter selon le domaine réel
-      file_url = `/uploads/${req.file.filename}`;
-    }
-
-    // Vérification : au moins un contenu ou un fichier
-    if (!sender_id) {
-      return res.status(400).json({ error: 'sender_id required' });
-    }
     if ((!content || content.trim() === '') && !file_url) {
       return res.status(400).json({ error: 'Le message doit contenir du texte ou un fichier.' });
     }
-
-    const sql = `
+    const messageId = await insert(db, `
       INSERT INTO messages (chat_id, sender_id, content, created_at, file_url, file_type)
       VALUES (?, ?, ?, NOW(), ?, ?)
-    `;
-    db.query(sql, [chat_id, sender_id, content || null, file_url, file_type || null], (err, result) => {
-      if (err) return res.status(500).json({ error: err });
-      res.json({ success: true, message_id: result.insertId, file_url });
-    });
-  });
+    `, [chat_id, senderId, content || null, file_url, file_type || null]);
+    res.json({ success: true, message_id: messageId, file_url });
+  }));
 
   return router;
 };

@@ -19,8 +19,6 @@ class AnnouncementsController {
   async getPublicAnnouncements(filters = {}) {
     const { sport_type, status, club_id, user_id } = filters;
     
-    console.log('🔍 getPublicAnnouncements - Filtres reçus:', { sport_type, status, club_id, user_id });
-    
     let sql = `
       SELECT a.*, 
              u.name AS creator_name,
