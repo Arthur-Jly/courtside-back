@@ -12,9 +12,10 @@ const PORT = process.env.PORT || 3001;
 const app = express();
 
 app.use(express.json());
+const corsOrigin = process.env.CORS_ORIGIN || 'http://localhost:5173';
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || 'http://localhost:5173',
-  credentials: true,
+  origin: corsOrigin,
+  credentials: corsOrigin !== '*',
 }));
 app.use(httpLogger);
 app.use('/uploads', express.static(require('path').join(__dirname, '..', 'uploads')));

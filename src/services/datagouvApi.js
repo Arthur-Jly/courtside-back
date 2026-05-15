@@ -57,13 +57,25 @@ const SPORT_FILTERS_MAPPING = {
  * @param {string} sport - Sport recherché
  * @returns {Object|null} Objet avec aps_name et/ou equip_type_name ou null
  */
+const SPORT_ALIASES = {
+  'basket': 'basketball',
+  'foot': 'football',
+  'futsal': 'football',
+  'ping': 'badminton',
+  'ping-pong': 'badminton',
+  'table_tennis': 'badminton',
+  'volley': 'volleyball',
+  'hand': 'handball',
+};
+
 function getSportFilters(sport) {
   if (!sport || sport.toLowerCase() === 'all') {
     return null;
   }
-  
+
   const sportLower = sport.toLowerCase();
-  return SPORT_FILTERS_MAPPING[sportLower] || null;
+  const normalized = SPORT_ALIASES[sportLower] || sportLower;
+  return SPORT_FILTERS_MAPPING[normalized] || null;
 }
 
 /**
@@ -99,6 +111,89 @@ function getNeighboringDepartments(depCode) {
   return neighbors[depCode] || [];
 }
 
+// Types d'équipements connus comme valides (vrais terrains praticables)
+const VALID_EQUIP_TYPES = [
+  'court de tennis',
+  'terrain de football',
+  'terrain de basket',
+  'terrain de volley',
+  'terrain de badminton',
+  'terrain de handball',
+  'terrain de rugby',
+  'terrain de padel',
+  'salle ou terrain de squash',
+  'terrain multisports',
+  'city stade',
+  'plateau eps',
+  'terrain de pétanque',
+  'terrain de beach',
+  'salle de sports',
+  'gymnase',
+  'halle de sports',
+  'complexe sportif',
+  'terrain de sport',
+  'skate park',
+  'mur de tennis',
+];
+
+// Patterns qui indiquent un espace vague / non praticable
+const INVALID_TYPE_PATTERNS = [
+  'espace naturel',
+  'terrain vague',
+  'espace libre',
+  'piste cyclable',
+  'chemin',
+  'sentier',
+  'parcours de santé',
+  'aire de jeux',
+  'aire de repos',
+  'espace vert',
+];
+
+const INVALID_NAME_PATTERNS = [
+  'terrain vague',
+  'espace vert',
+  'terrain nu',
+  'non renseigné',
+  'sans nom',
+  'inconnu',
+];
+
+/**
+ * Vérifie si un équipement est un vrai terrain praticable
+ * @param {Object} eq - Équipement data.gouv
+ * @returns {boolean}
+ */
+function isValidEquipement(eq) {
+  // Doit avoir un nom d'installation non vide (min 3 chars)
+  if (!eq.inst_nom || eq.inst_nom.trim().length < 3) return false;
+
+  // Doit avoir un type d'équipement
+  if (!eq.equip_type_name || eq.equip_type_name.trim() === '') return false;
+
+  // Doit être ouvert au public
+  if (eq.equip_ouv_public_bool === 'false') return false;
+
+  const typeLower = eq.equip_type_name.toLowerCase();
+  const nameLower = eq.inst_nom.toLowerCase();
+
+  // Rejeter les types invalides connus
+  if (INVALID_TYPE_PATTERNS.some(p => typeLower.includes(p))) return false;
+
+  // Rejeter les noms invalides connus
+  if (INVALID_NAME_PATTERNS.some(p => nameLower.includes(p))) return false;
+
+  // Accepter si le type match un type valide connu
+  if (VALID_EQUIP_TYPES.some(t => typeLower.includes(t))) return true;
+
+  // Accepter si le type contient "terrain", "salle", "court", "stade", "piste", "piscine"
+  const VALID_KEYWORDS = ['terrain', 'salle', 'court', 'stade', 'gymnase', 'halle', 'complexe', 'piscine', 'city', 'plateau'];
+  if (VALID_KEYWORDS.some(k => typeLower.includes(k))) return true;
+
+  // Par défaut rejeter si le type n'est pas reconnu
+  return false;
+}
+
 /**
  * Récupérer les équipements d'un ou plusieurs départements
  * @private
@@ -128,8 +223,9 @@ async function fetchEquipementsByDepartments(depCodes, sportFilters, maxResults 
       }
     }
     
-    // Filtre ACCÈS LIBRE : uniquement les équipements publics accessibles librement
+    // Filtre ACCÈS LIBRE + ouverture public
     urlParams.append('refine', 'equip_acc_libre:true');
+    urlParams.append('refine', 'equip_ouv_public_bool:true');
     
     // Sélectionner uniquement les champs utiles
     urlParams.append('select', [
@@ -303,6 +399,11 @@ async function searchEquipements(filters = {}) {
     
     // Si on a des coordonnées, filtrer par distance
     if (lat && lon) {
+      // Rejeter les terrains vagues / espaces non praticables
+      const beforeQualityFilter = results.length;
+      results = results.filter(isValidEquipement);
+      console.log(`[DataGouvAPI] Filtre qualité: ${beforeQualityFilter} → ${results.length} équipements valides`);
+
       // Filtrer les équipements sans coordonnées
       results = results.filter(eq => eq.equip_coordonnees && eq.equip_coordonnees.lat && eq.equip_coordonnees.lon);
       
@@ -455,5 +556,6 @@ module.exports = {
   searchEquipements,
   transformEquipementToClub,
   calculateDistance,
+  isValidEquipement,
   SPORT_FILTERS_MAPPING,
 };
