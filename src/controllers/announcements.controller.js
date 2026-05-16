@@ -301,7 +301,7 @@ class AnnouncementsController {
     }
 
     // Déterminer si c'est une annonce pour lieu public ou club privé
-    const isPublicPlace = Boolean(public_place_id && !slot_id);
+    const isPublicPlace = !slot_id;
 
     if (isPublicPlace) {
       // LIEU PUBLIC : Validation des données manuelles
