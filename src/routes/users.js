@@ -76,7 +76,11 @@ module.exports = (db) => {
     const user = await queryOne(db, 'SELECT id, name, username FROM users WHERE id = ?', [id]);
     if (!user) throw new NotFoundError('Utilisateur non trouvé');
     const profile = await queryOne(db, 'SELECT * FROM user_profiles WHERE user_id = ?', [id]);
-    res.json({ profile: profile ? { ...profile, user_name: user.name, username: user.username } : { user_id: id, user_name: user.name, username: user.username, is_public: 0 } });
+    res.json({
+      profile: profile
+        ? { ...profile, is_public: Number(profile.is_public) === 1, user_name: user.name, username: user.username }
+        : { user_id: id, is_public: false, user_name: user.name, username: user.username },
+    });
   }));
 
   // Upsert user_profiles details
