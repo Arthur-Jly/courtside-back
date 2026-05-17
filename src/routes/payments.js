@@ -1,20 +1,34 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
+const { requireAuth, optionalAuth } = require('../middleware/auth');
+const { asyncHandler } = require('../middleware/errorHandler');
 
-module.exports = function(db){
+const paymentsLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+module.exports = function paymentsRouter(db) {
   const router = express.Router();
   const controller = require('../controllers/payments.controller')(db);
 
-  // Créer une session de paiement Stripe Checkout
-  router.post('/payments/create-checkout-session', controller.createCheckoutSession);
+  router.post('/payments/create-checkout-session', requireAuth, paymentsLimiter, asyncHandler(controller.createCheckoutSession));
+  router.post('/payments/confirm-payment', optionalAuth, paymentsLimiter, asyncHandler(controller.confirmPayment));
+  router.get('/payments/session/:sessionId', requireAuth, paymentsLimiter, asyncHandler(controller.getSessionDetails));
 
-  // Webhook pour recevoir les événements Stripe
-  router.post('/payments/webhook', express.raw({ type: 'application/json' }), controller.handleWebhook);
+  return router;
+};
 
-  // Route de callback après paiement (pour dev sans webhook)
-  router.post('/payments/confirm-payment', controller.confirmPayment);
-
-  // Récupérer les détails d'une session
-  router.get('/payments/session/:sessionId', controller.getSessionDetails);
-
+// Webhook mounted separately with raw body before express.json().
+module.exports.webhook = function webhookRouter(db) {
+  const router = express.Router();
+  const controller = require('../controllers/payments.controller')(db);
+  router.post(
+    '/payments/webhook',
+    express.raw({ type: 'application/json', limit: '1mb' }),
+    asyncHandler(controller.handleWebhook),
+  );
   return router;
 };

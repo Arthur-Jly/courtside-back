@@ -1,411 +1,167 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
+const { requireAuth } = require('../middleware/auth');
+const { asyncHandler, NotFoundError, ForbiddenError, ConflictError } = require('../middleware/errorHandler');
+const { validate, schemas } = require('../middleware/validation');
+const { queryPromise, queryOne, insert } = require('../utils/dbHelpers');
 
-module.exports = function(db) {
+const writeLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+module.exports = (db) => {
   const router = express.Router();
 
-  /**
-   * GET /api/reviews/clubs/:clubId
-   * Récupère tous les commentaires d'un club avec les infos utilisateur
-   */
-  router.get('/reviews/clubs/:clubId', (req, res) => {
-    const { clubId } = req.params;
-    const sql = `
-      SELECT 
-        r.id, 
-        r.user_id, 
-        r.club_id, 
-        r.public_place_id,
-        r.rating, 
-        r.comment, 
-        r.response,
-        r.created_at,
-        u.name AS user_name,
-        u.avatar AS user_avatar
+  router.get('/reviews/clubs/:clubId', asyncHandler(async (req, res) => {
+    const clubId = Number(req.params.clubId);
+    if (!Number.isFinite(clubId)) return res.status(400).json({ error: 'clubId invalide' });
+    const reviews = await queryPromise(db, `
+      SELECT r.id, r.user_id, r.club_id, r.public_place_id, r.rating, r.comment, r.response, r.created_at,
+             u.name AS user_name, u.avatar AS user_avatar
       FROM reviews r
       LEFT JOIN users u ON r.user_id = u.id
       WHERE r.club_id = ?
       ORDER BY r.created_at DESC
-    `;
-    
-    db.query(sql, [clubId], (err, reviews) => {
-      if (err) {
-        console.error('Erreur lors de la récupération des avis:', err);
-        return res.status(500).json({ 
-          error: 'Erreur lors de la récupération des avis', 
-          details: err 
-        });
-      }
-      res.json(reviews);
-    });
-  });
+      LIMIT 200
+    `, [clubId]);
+    res.json(reviews);
+  }));
 
-  /**
-   * GET /api/reviews/public-places/:publicPlaceId
-   * Récupère tous les commentaires d'un lieu public avec les infos utilisateur
-   */
-  router.get('/reviews/public-places/:publicPlaceId', (req, res) => {
-    const { publicPlaceId } = req.params;
-    const sql = `
-      SELECT 
-        r.id, 
-        r.user_id, 
-        r.club_id, 
-        r.public_place_id,
-        r.rating, 
-        r.comment, 
-        r.response,
-        r.created_at,
-        u.name AS user_name,
-        u.avatar AS user_avatar
+  router.get('/reviews/public-places/:publicPlaceId', asyncHandler(async (req, res) => {
+    const id = String(req.params.publicPlaceId).slice(0, 255);
+    const reviews = await queryPromise(db, `
+      SELECT r.id, r.user_id, r.club_id, r.public_place_id, r.rating, r.comment, r.response, r.created_at,
+             u.name AS user_name, u.avatar AS user_avatar
       FROM reviews r
       LEFT JOIN users u ON r.user_id = u.id
       WHERE r.public_place_id = ?
       ORDER BY r.created_at DESC
-    `;
-    
-    db.query(sql, [publicPlaceId], (err, reviews) => {
-      if (err) {
-        console.error('Erreur lors de la récupération des avis du lieu public:', err);
-        return res.status(500).json({ 
-          error: 'Erreur lors de la récupération des avis', 
-          details: err 
-        });
-      }
-      res.json(reviews);
-    });
+      LIMIT 200
+    `, [id]);
+    res.json(reviews);
+  }));
+
+  const statsSql = (col) => `
+    SELECT COUNT(*) AS total_reviews, AVG(rating) AS average_rating,
+           SUM(CASE WHEN rating = 5 THEN 1 ELSE 0 END) AS five_stars,
+           SUM(CASE WHEN rating = 4 THEN 1 ELSE 0 END) AS four_stars,
+           SUM(CASE WHEN rating = 3 THEN 1 ELSE 0 END) AS three_stars,
+           SUM(CASE WHEN rating = 2 THEN 1 ELSE 0 END) AS two_stars,
+           SUM(CASE WHEN rating = 1 THEN 1 ELSE 0 END) AS one_star
+    FROM reviews WHERE ${col} = ?`;
+
+  const shapeStats = (row) => ({
+    total_reviews: Number(row.total_reviews) || 0,
+    average_rating: Number(row.average_rating) || 0,
+    five_stars: Number(row.five_stars) || 0,
+    four_stars: Number(row.four_stars) || 0,
+    three_stars: Number(row.three_stars) || 0,
+    two_stars: Number(row.two_stars) || 0,
+    one_star: Number(row.one_star) || 0,
   });
 
-  /**
-   * GET /api/reviews/public-places/:publicPlaceId/stats
-   * Récupère les statistiques des avis d'un lieu public
-   */
-  router.get('/reviews/public-places/:publicPlaceId/stats', (req, res) => {
-    const { publicPlaceId } = req.params;
-    const sql = `
-      SELECT 
-        COUNT(*) AS total_reviews,
-        AVG(rating) AS average_rating,
-        SUM(CASE WHEN rating = 5 THEN 1 ELSE 0 END) AS five_stars,
-        SUM(CASE WHEN rating = 4 THEN 1 ELSE 0 END) AS four_stars,
-        SUM(CASE WHEN rating = 3 THEN 1 ELSE 0 END) AS three_stars,
-        SUM(CASE WHEN rating = 2 THEN 1 ELSE 0 END) AS two_stars,
-        SUM(CASE WHEN rating = 1 THEN 1 ELSE 0 END) AS one_star
-      FROM reviews
-      WHERE public_place_id = ?
-    `;
-    
-    db.query(sql, [publicPlaceId], (err, stats) => {
-      if (err) {
-        console.error('Erreur lors de la récupération des statistiques du lieu public:', err);
-        return res.status(500).json({ 
-          error: 'Erreur lors de la récupération des statistiques', 
-          details: err 
-        });
-      }
-      
-      const result = stats[0];
-      res.json({
-        total_reviews: Number(result.total_reviews) || 0,
-        average_rating: Number(result.average_rating) || 0,
-        five_stars: Number(result.five_stars) || 0,
-        four_stars: Number(result.four_stars) || 0,
-        three_stars: Number(result.three_stars) || 0,
-        two_stars: Number(result.two_stars) || 0,
-        one_star: Number(result.one_star) || 0
-      });
-    });
-  });
+  router.get('/reviews/clubs/:clubId/stats', asyncHandler(async (req, res) => {
+    const clubId = Number(req.params.clubId);
+    if (!Number.isFinite(clubId)) return res.status(400).json({ error: 'clubId invalide' });
+    const row = (await queryPromise(db, statsSql('club_id'), [clubId]))[0] || {};
+    res.json(shapeStats(row));
+  }));
 
-  /**
-   * GET /api/reviews/:id
-   * Récupère un commentaire spécifique par son ID
-   */
-  router.get('/reviews/:id', (req, res) => {
-    const { id } = req.params;
-    const sql = `
-      SELECT 
-        r.id, 
-        r.user_id, 
-        r.club_id, 
-        r.public_place_id,
-        r.rating, 
-        r.comment, 
-        r.response,
-        r.created_at,
-        u.name AS user_name,
-        u.avatar AS user_avatar
+  router.get('/reviews/public-places/:publicPlaceId/stats', asyncHandler(async (req, res) => {
+    const id = String(req.params.publicPlaceId).slice(0, 255);
+    const row = (await queryPromise(db, statsSql('public_place_id'), [id]))[0] || {};
+    res.json(shapeStats(row));
+  }));
+
+  router.get('/reviews/:id', asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
+    const r = await queryOne(db, `
+      SELECT r.id, r.user_id, r.club_id, r.public_place_id, r.rating, r.comment, r.response, r.created_at,
+             u.name AS user_name, u.avatar AS user_avatar
       FROM reviews r
       LEFT JOIN users u ON r.user_id = u.id
       WHERE r.id = ?
-    `;
-    
-    db.query(sql, [id], (err, reviews) => {
-      if (err) {
-        console.error('Erreur lors de la récupération de l\'avis:', err);
-        return res.status(500).json({ 
-          error: 'Erreur lors de la récupération de l\'avis', 
-          details: err 
-        });
-      }
-      
-      if (reviews.length === 0) {
-        return res.status(404).json({ error: 'Avis non trouvé' });
-      }
-      
-      res.json(reviews[0]);
-    });
-  });
+    `, [id]);
+    if (!r) throw new NotFoundError('Avis non trouvé');
+    res.json(r);
+  }));
 
-  /**
-   * POST /api/reviews
-   * Créer un nouveau commentaire
-   * Body: { user_id, club_id?, public_place_id?, rating, comment }
-   * Note: Soit club_id soit public_place_id doit être fourni
-   */
-  router.post('/reviews', (req, res) => {
-    const { user_id, club_id, public_place_id, rating, comment } = req.body;
-    
-    // Validation
-    if (!user_id || !rating || !comment) {
-      return res.status(400).json({ 
-        error: 'Champs requis manquants', 
-        required: ['user_id', 'rating', 'comment', 'club_id ou public_place_id']
-      });
+  router.post('/reviews', requireAuth, writeLimiter, validate(schemas.reviewCreate), asyncHandler(async (req, res) => {
+    const { club_id, public_place_id, rating, comment } = req.body;
+    const userId = req.user.id;
+
+    // One review per (user, target) — prevent spam.
+    if (club_id) {
+      const dup = await queryOne(db, 'SELECT id FROM reviews WHERE user_id = ? AND club_id = ?', [userId, club_id]);
+      if (dup) throw new ConflictError('Vous avez déjà publié un avis pour ce club.');
+    } else if (public_place_id) {
+      const dup = await queryOne(db, 'SELECT id FROM reviews WHERE user_id = ? AND public_place_id = ?', [userId, public_place_id]);
+      if (dup) throw new ConflictError('Vous avez déjà publié un avis pour ce lieu.');
     }
 
-    if (!club_id && !public_place_id) {
-      return res.status(400).json({ 
-        error: 'Soit club_id soit public_place_id doit être fourni'
-      });
-    }
-    
-    if (rating < 1 || rating > 5) {
-      return res.status(400).json({ 
-        error: 'La note doit être entre 1 et 5' 
-      });
-    }
-    
-    const sql = `
-      INSERT INTO reviews (user_id, club_id, public_place_id, rating, comment, created_at) 
+    const id = await insert(db, `
+      INSERT INTO reviews (user_id, club_id, public_place_id, rating, comment, created_at)
       VALUES (?, ?, ?, ?, ?, NOW())
-    `;
-    
-    db.query(sql, [user_id, club_id || null, public_place_id || null, rating, comment], (err, result) => {
-      if (err) {
-        console.error('Erreur lors de la création de l\'avis:', err);
-        return res.status(500).json({ 
-          error: 'Erreur lors de la création de l\'avis', 
-          details: err 
-        });
-      }
-      
-      res.status(201).json({ 
-        success: true, 
-        id: result.insertId,
-        message: 'Avis créé avec succès'
-      });
-    });
-  });
+    `, [userId, club_id || null, public_place_id || null, rating, comment]);
+    res.status(201).json({ success: true, id });
+  }));
 
-  /**
-   * PUT /api/reviews/:id
-   * Modifier un commentaire existant
-   * Body: { rating?, comment? }
-   */
-  router.put('/reviews/:id', (req, res) => {
-    const { id } = req.params;
+  router.put('/reviews/:id', requireAuth, validate(schemas.reviewUpdate), asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
+    const row = await queryOne(db, 'SELECT user_id FROM reviews WHERE id = ?', [id]);
+    if (!row) throw new NotFoundError('Avis non trouvé');
+    if (row.user_id !== req.user.id) throw new ForbiddenError();
+
     const { rating, comment } = req.body;
-    
-    if (!rating && !comment) {
-      return res.status(400).json({ 
-        error: 'Au moins un champ (rating ou comment) doit être fourni' 
-      });
-    }
-    
-    if (rating && (rating < 1 || rating > 5)) {
-      return res.status(400).json({ 
-        error: 'La note doit être entre 1 et 5' 
-      });
-    }
-    
     const updates = [];
-    const values = [];
-    
-    if (rating) {
-      updates.push('rating = ?');
-      values.push(rating);
-    }
-    
-    if (comment) {
-      updates.push('comment = ?');
-      values.push(comment);
-    }
-    
-    values.push(id);
-    
-    const sql = `UPDATE reviews SET ${updates.join(', ')} WHERE id = ?`;
-    
-    db.query(sql, values, (err, result) => {
-      if (err) {
-        console.error('Erreur lors de la modification de l\'avis:', err);
-        return res.status(500).json({ 
-          error: 'Erreur lors de la modification de l\'avis', 
-          details: err 
-        });
-      }
-      
-      if (result.affectedRows === 0) {
-        return res.status(404).json({ error: 'Avis non trouvé' });
-      }
-      
-      res.json({ 
-        success: true, 
-        message: 'Avis modifié avec succès' 
-      });
-    });
-  });
+    const vals = [];
+    if (rating !== undefined) { updates.push('rating = ?'); vals.push(rating); }
+    if (comment !== undefined) { updates.push('comment = ?'); vals.push(comment); }
+    vals.push(id);
+    await queryPromise(db, `UPDATE reviews SET ${updates.join(', ')} WHERE id = ?`, vals);
+    res.json({ success: true });
+  }));
 
-  /**
-   * PUT /api/reviews/:id/response
-   * Ajouter/modifier la réponse d'un admin de club à un commentaire
-   * Body: { response }
-   */
-  router.put('/reviews/:id/response', (req, res) => {
-    const { id } = req.params;
-    const { response } = req.body;
-    
-    if (response === undefined) {
-      return res.status(400).json({ 
-        error: 'Le champ response est requis' 
-      });
-    }
-    
-    const sql = 'UPDATE reviews SET response = ? WHERE id = ?';
-    
-    db.query(sql, [response || null, id], (err, result) => {
-      if (err) {
-        console.error('Erreur lors de l\'ajout de la réponse:', err);
-        return res.status(500).json({ 
-          error: 'Erreur lors de l\'ajout de la réponse', 
-          details: err 
-        });
-      }
-      
-      if (result.affectedRows === 0) {
-        return res.status(404).json({ error: 'Avis non trouvé' });
-      }
-      
-      res.json({ 
-        success: true, 
-        message: 'Réponse ajoutée avec succès' 
-      });
-    });
-  });
+  router.put('/reviews/:id/response', requireAuth, validate(schemas.reviewResponse), asyncHandler(async (req, res) => {
+    if (req.user.role !== 'club_admin') throw new ForbiddenError('Réservé aux admins de club');
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
+    const row = await queryOne(db, 'SELECT club_id FROM reviews WHERE id = ?', [id]);
+    if (!row) throw new NotFoundError('Avis non trouvé');
+    if (!row.club_id || Number(row.club_id) !== Number(req.user.club_id)) throw new ForbiddenError();
+    await queryPromise(db, 'UPDATE reviews SET response = ? WHERE id = ?', [req.body.response, id]);
+    res.json({ success: true });
+  }));
 
-  /**
-   * DELETE /api/reviews/:id
-   * Supprimer un commentaire
-   */
-  router.delete('/reviews/:id', (req, res) => {
-    const { id } = req.params;
-    const sql = 'DELETE FROM reviews WHERE id = ?';
-    
-    db.query(sql, [id], (err, result) => {
-      if (err) {
-        console.error('Erreur lors de la suppression de l\'avis:', err);
-        return res.status(500).json({ 
-          error: 'Erreur lors de la suppression de l\'avis', 
-          details: err 
-        });
-      }
-      
-      if (result.affectedRows === 0) {
-        return res.status(404).json({ error: 'Avis non trouvé' });
-      }
-      
-      res.json({ 
-        success: true, 
-        message: 'Avis supprimé avec succès' 
-      });
-    });
-  });
+  router.delete('/reviews/:id', requireAuth, asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
+    const row = await queryOne(db, 'SELECT user_id FROM reviews WHERE id = ?', [id]);
+    if (!row) throw new NotFoundError('Avis non trouvé');
+    if (row.user_id !== req.user.id) throw new ForbiddenError();
+    await queryPromise(db, 'DELETE FROM reviews WHERE id = ?', [id]);
+    res.json({ success: true });
+  }));
 
-  /**
-   * GET /api/reviews/users/:userId
-   * Récupère tous les commentaires d'un utilisateur
-   */
-  router.get('/reviews/users/:userId', (req, res) => {
-    const { userId } = req.params;
-    const sql = `
-      SELECT 
-        r.id, 
-        r.user_id, 
-        r.club_id, 
-        r.rating, 
-        r.comment, 
-        r.response,
-        r.created_at,
-        c.name AS club_name,
-        c.city AS club_city
+  router.get('/reviews/users/:userId', asyncHandler(async (req, res) => {
+    const userId = Number(req.params.userId);
+    if (!Number.isFinite(userId)) return res.status(400).json({ error: 'userId invalide' });
+    const reviews = await queryPromise(db, `
+      SELECT r.id, r.user_id, r.club_id, r.rating, r.comment, r.response, r.created_at,
+             c.name AS club_name, c.city AS club_city
       FROM reviews r
       LEFT JOIN clubs c ON r.club_id = c.id
       WHERE r.user_id = ?
       ORDER BY r.created_at DESC
-    `;
-    
-    db.query(sql, [userId], (err, reviews) => {
-      if (err) {
-        console.error('Erreur lors de la récupération des avis:', err);
-        return res.status(500).json({ 
-          error: 'Erreur lors de la récupération des avis', 
-          details: err 
-        });
-      }
-      res.json(reviews);
-    });
-  });
-
-  /**
-   * GET /api/reviews/clubs/:clubId/stats
-   * Récupère les statistiques des avis d'un club
-   */
-  router.get('/reviews/clubs/:clubId/stats', (req, res) => {
-    const { clubId } = req.params;
-    const sql = `
-      SELECT 
-        COUNT(*) AS total_reviews,
-        AVG(rating) AS average_rating,
-        SUM(CASE WHEN rating = 5 THEN 1 ELSE 0 END) AS five_stars,
-        SUM(CASE WHEN rating = 4 THEN 1 ELSE 0 END) AS four_stars,
-        SUM(CASE WHEN rating = 3 THEN 1 ELSE 0 END) AS three_stars,
-        SUM(CASE WHEN rating = 2 THEN 1 ELSE 0 END) AS two_stars,
-        SUM(CASE WHEN rating = 1 THEN 1 ELSE 0 END) AS one_star
-      FROM reviews
-      WHERE club_id = ?
-    `;
-    
-    db.query(sql, [clubId], (err, stats) => {
-      if (err) {
-        console.error('Erreur lors de la récupération des statistiques:', err);
-        return res.status(500).json({ 
-          error: 'Erreur lors de la récupération des statistiques', 
-          details: err 
-        });
-      }
-      
-      // Convertir les valeurs en nombres pour éviter les problèmes de concaténation
-      const result = stats[0];
-      res.json({
-        total_reviews: Number(result.total_reviews) || 0,
-        average_rating: Number(result.average_rating) || 0,
-        five_stars: Number(result.five_stars) || 0,
-        four_stars: Number(result.four_stars) || 0,
-        three_stars: Number(result.three_stars) || 0,
-        two_stars: Number(result.two_stars) || 0,
-        one_star: Number(result.one_star) || 0
-      });
-    });
-  });
+      LIMIT 200
+    `, [userId]);
+    res.json(reviews);
+  }));
 
   return router;
 };

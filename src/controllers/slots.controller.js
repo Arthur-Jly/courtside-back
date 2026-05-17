@@ -164,6 +164,10 @@ async function generateSlotsForTerrain(terrainId, fromDate, toDate, slotDuration
 }
 
 async function adminGenerateSlots(req, res){
+  // Scope to caller's club. Never generate for terrains outside their club.
+  const adminClubId = req.user && req.user.club_id;
+  if (!adminClubId) return res.status(403).json({ error: 'club admin scope required' });
+
   const daysRaw = Object.prototype.hasOwnProperty.call(req.body, 'days') ? req.body.days : undefined;
   const weeksRaw = Object.prototype.hasOwnProperty.call(req.body, 'weeks') ? req.body.weeks : undefined;
   const days = typeof daysRaw !== 'undefined' ? Number(daysRaw) : null;
@@ -180,7 +184,7 @@ async function adminGenerateSlots(req, res){
     toDate = new Date(new Date(fromDate).getTime() + (6*7*24*60*60*1000)).toISOString().slice(0,10);
   }
 
-  const [tRows] = await pool.query('SELECT id FROM `terrains`');
+  const [tRows] = await pool.query('SELECT id FROM `terrains` WHERE club_id = ?', [adminClubId]);
   const terrains = tRows || [];
   let totalInserted = 0;
   for(const t of terrains){
@@ -192,8 +196,12 @@ async function adminGenerateSlots(req, res){
 }
 
 async function adminGenerateSlotsForTerrain(req, res){
-  const terrainId = req.body.terrain_id;
-  if(!terrainId) return res.status(400).json({ error: 'terrain_id required' });
+  const terrainId = Number(req.body.terrain_id);
+  if(!Number.isFinite(terrainId)) return res.status(400).json({ error: 'terrain_id required' });
+  // ownership: terrain must belong to caller's club
+  const [trows] = await pool.query('SELECT club_id FROM terrains WHERE id = ?', [terrainId]);
+  if (!trows || !trows[0]) return res.status(404).json({ error: 'terrain not found' });
+  if (Number(trows[0].club_id) !== Number(req.user.club_id)) return res.status(403).json({ error: 'forbidden' });
   const weeksRaw = Object.prototype.hasOwnProperty.call(req.body, 'weeks') ? req.body.weeks : undefined;
   const weeks = typeof weeksRaw !== 'undefined' ? Number(weeksRaw) : null;
   const fromDate = req.body.fromDate || new Date().toISOString().slice(0,10);
@@ -210,8 +218,9 @@ async function adminGenerateSlotsForTerrain(req, res){
 }
 
 async function adminGenerateSlotsForClub(req, res){
-  const clubId = req.body.club_id;
-  if(!clubId) return res.status(400).json({ error: 'club_id required' });
+  const clubId = Number(req.body.club_id);
+  if(!Number.isFinite(clubId)) return res.status(400).json({ error: 'club_id required' });
+  if (Number(req.user.club_id) !== clubId) return res.status(403).json({ error: 'forbidden' });
   const weeksRaw = Object.prototype.hasOwnProperty.call(req.body, 'weeks') ? req.body.weeks : undefined;
   const weeks = typeof weeksRaw !== 'undefined' ? Number(weeksRaw) : null;
   const fromDate = req.body.fromDate || new Date().toISOString().slice(0,10);
@@ -288,8 +297,9 @@ async function listSlotsByClub(req, res){
 
 async function bookSlot(req, res){
   const slotId = req.params.id;
-  const userId = req.body.user_id; // naive
-  if(!userId) return res.status(400).json({ ok:false, error: 'user_id required' });
+  // SECURITY: never trust user_id from request body. Always use authenticated user.
+  const userId = req.user && req.user.id;
+  if(!userId) return res.status(401).json({ ok:false, error: 'authentication required' });
   const conn = await db.getConnection && await db.getConnection();
   try{
     if(conn){
@@ -440,24 +450,45 @@ async function bookSlot(req, res){
 
 // POST /reservations/:id/cancel
 async function cancelReservation(req, res){
-  const reservationId = req.params.id;
-  // fetch reservation
-  const [rrows] = await pool.query('SELECT id, slot_id, status FROM reservations WHERE id = ?', [reservationId]);
+  const reservationId = Number(req.params.id);
+  if (!Number.isFinite(reservationId)) return res.status(400).json({ ok:false, error:'id invalide' });
+  const userId = req.user && req.user.id;
+  if(!userId) return res.status(401).json({ ok:false, error:'authentication required' });
+
+  const [rrows] = await pool.query('SELECT id, slot_id, status, user_id, terrain_id FROM reservations WHERE id = ?', [reservationId]);
   const row = rrows && rrows[0];
   if(!row) return res.status(404).json({ ok:false, error:'reservation not found' });
-  if(row.status !== 'active') return res.status(400).json({ ok:false, error:'cannot cancel' });
+
+  // Only the reservation owner OR the club admin of the terrain's club may cancel.
+  const isOwner = Number(row.user_id) === Number(userId);
+  let isClubAdmin = false;
+  if (req.user.role === 'club_admin' && req.user.club_id) {
+    const [trows] = await pool.query('SELECT club_id FROM terrains WHERE id = ?', [row.terrain_id]);
+    isClubAdmin = trows && trows[0] && Number(trows[0].club_id) === Number(req.user.club_id);
+  }
+  if (!isOwner && !isClubAdmin) return res.status(403).json({ ok:false, error:'forbidden' });
+
+  if(row.status !== 'active' && row.status !== 'confirmed') return res.status(400).json({ ok:false, error:'cannot cancel' });
 
   await pool.query('UPDATE reservations SET status = ? WHERE id = ?', ['cancelled', reservationId]);
-  await pool.query('UPDATE slots SET status = ? WHERE id = ?', ['free', row.slot_id]);
+  if (row.slot_id) {
+    await pool.query('UPDATE slots SET status = ? WHERE id = ?', ['free', row.slot_id]);
+  } else {
+    await pool.query('UPDATE slots SET status = ?, reservation_id = NULL WHERE reservation_id = ?', ['free', reservationId]);
+  }
   res.json({ ok:true });
 }
 
-// DELETE /admin/slots/cleanup
+// DELETE /admin/slots/cleanup — scoped to caller's club only.
 async function adminCleanupSlots(req, res){
+  const adminClubId = req.user && req.user.club_id;
+  if (!adminClubId) return res.status(403).json({ error: 'club admin scope required' });
   const keepDays = Number(req.body.keepDays || 30);
-  // delete slots older than keepDays: compute cutoff date in JS then delete
+  if (!Number.isFinite(keepDays) || keepDays < 1 || keepDays > 3650) {
+    return res.status(400).json({ error: 'keepDays invalide (1-3650)' });
+  }
   const cutoff = new Date(Date.now() - keepDays*24*60*60*1000).toISOString().slice(0,10);
-  await pool.query('DELETE FROM slots WHERE date < ?', [cutoff]);
+  await pool.query('DELETE FROM slots WHERE date < ? AND club_id = ?', [cutoff, adminClubId]);
   res.json({ ok:true, cutoff });
 }
 
@@ -519,9 +550,10 @@ async function listSlotsByClub(req, res){
   }
 }
 
-// Admin: remove duplicate slots (keep lowest id) across the table
+// Admin: remove duplicate slots within caller's club only.
 async function adminRemoveDuplicateSlots(req, res){
-  // This will delete rows that have same (terrain_id, date, start_time) and id greater than another
+  const adminClubId = req.user && req.user.club_id;
+  if (!adminClubId) return res.status(403).json({ error: 'club admin scope required' });
   const sql = `
     DELETE s1 FROM slots s1
     INNER JOIN slots s2
@@ -529,18 +561,19 @@ async function adminRemoveDuplicateSlots(req, res){
       AND s1.date = s2.date
       AND s1.start_time = s2.start_time
       AND s1.id > s2.id
+    WHERE s1.club_id = ?
   `;
-  const [result] = await pool.query(sql);
-  // result.affectedRows may be in result depending on client
-  const deleted = result && (result.affectedRows || result.affected_rows || result.affectedRows === 0 ? (result.affectedRows || result.affected_rows) : null);
-  res.json({ ok:true, deleted: deleted != null ? deleted : result });
+  const [result] = await pool.query(sql, [adminClubId]);
+  const deleted = result?.affectedRows ?? 0;
+  res.json({ ok:true, deleted });
 }
 
-// Admin: truncate slots table (delete everything)
+// Admin: wipe slots of caller's club only — never the entire table.
 async function adminTruncateSlots(req, res){
-  // Use TRUNCATE for fast deletion; can be replaced by DELETE if you need transaction/logging
-  await pool.query('TRUNCATE TABLE slots');
-  res.json({ ok:true, message: 'slots table truncated' });
+  const adminClubId = req.user && req.user.club_id;
+  if (!adminClubId) return res.status(403).json({ error: 'club admin scope required' });
+  const [result] = await pool.query('DELETE FROM slots WHERE club_id = ?', [adminClubId]);
+  res.json({ ok:true, deleted: result?.affectedRows ?? 0 });
 }
 
   return {

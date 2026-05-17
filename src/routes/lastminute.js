@@ -1,56 +1,28 @@
 const LastMinuteController = require('../controllers/lastminute.controller');
+const { asyncHandler, NotFoundError } = require('../middleware/errorHandler');
 
-module.exports = function(db) {
+module.exports = function (db) {
   const express = require('express');
   const router = express.Router();
   const controller = new LastMinuteController(db);
 
-  /**
-   * GET /api/lastminute
-   * Récupère les créneaux last minute avec filtres optionnels
-   * Query params: sport, location
-   */
-  router.get('/lastminute', async (req, res) => {
-    try {
-      const { sport, location } = req.query;
-      const slots = await controller.getLastMinuteSlots({ sport, location });
-      
-      res.json({ 
-        last_minute_slots: slots,
-        count: slots.length 
-      });
-    } catch (err) {
-      console.error('Erreur lors de la récupération des créneaux:', err);
-      res.status(500).json({ 
-        error: 'Erreur lors de la récupération des créneaux last minute', 
-        details: process.env.NODE_ENV === 'development' ? err.message : undefined
-      });
-    }
-  });
+  router.get('/lastminute', asyncHandler(async (req, res) => {
+    const { sport, location } = req.query;
+    const slots = await controller.getLastMinuteSlots({ sport, location });
+    res.json({ last_minute_slots: slots, count: slots.length });
+  }));
 
-  /**
-   * GET /api/lastminute/:id
-   * Récupère un créneau spécifique par son ID
-   */
-  router.get('/lastminute/:id', async (req, res) => {
+  router.get('/lastminute/:id', asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
     try {
-      const { id } = req.params;
-      const slot = await controller.getSlotById(parseInt(id));
-      
+      const slot = await controller.getSlotById(id);
       res.json({ slot });
     } catch (err) {
-      console.error('Erreur lors de la récupération du créneau:', err);
-      
-      if (err.message === 'Créneau introuvable') {
-        res.status(404).json({ error: err.message });
-      } else {
-        res.status(500).json({ 
-          error: 'Erreur lors de la récupération du créneau',
-          details: process.env.NODE_ENV === 'development' ? err.message : undefined
-        });
-      }
+      if (err.message === 'Créneau introuvable') throw new NotFoundError(err.message);
+      throw err;
     }
-  });
+  }));
 
   return router;
 };

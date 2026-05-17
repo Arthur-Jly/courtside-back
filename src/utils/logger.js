@@ -68,13 +68,15 @@ class Logger {
   }
 
   http(req, res, duration) {
-    const message = `${req.method} ${req.url} - ${res.statusCode} - ${duration}ms`;
+    // Strip query string from logged URL — query params can carry tokens or PII.
+    const urlPath = (req.originalUrl || req.url || '').split('?')[0];
+    const message = `${req.method} ${urlPath} - ${res.statusCode} - ${duration}ms`;
     this._log(LOG_LEVELS.HTTP, message, {
       method: req.method,
-      url: req.url,
+      url: urlPath,
       status: res.statusCode,
       duration,
-      ip: req.ip
+      ip: req.ip,
     });
   }
 }

@@ -1,12 +1,18 @@
+const { logger } = require('../utils/logger');
+
 module.exports = function(db) {
   const pool = (db && typeof db.promise === 'function') ? db.promise() : db;
 
   // GET /clubs/:id/finances?period=day|week|month|year|total&date=YYYY-MM-DD
   async function getClubFinances(req, res) {
     try {
-      const clubId = req.params.id;
-      const period = req.query.period || 'month'; // day, week, month, year, total
-      const targetDate = req.query.date ? new Date(req.query.date) : new Date();
+      const clubId = Number(req.params.id);
+      if (!Number.isFinite(clubId)) return res.status(400).json({ error: 'id invalide' });
+      const allowedPeriods = ['day', 'week', 'month', 'year', 'total'];
+      const period = allowedPeriods.includes(req.query.period) ? req.query.period : 'month';
+      const targetDate = req.query.date && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date)
+        ? new Date(req.query.date)
+        : new Date();
 
       // Calculate date range based on period
       let startDate, endDate;
@@ -172,7 +178,7 @@ module.exports = function(db) {
       });
 
     } catch (error) {
-      console.error('Error fetching club finances:', error);
+      logger.error('Error fetching club finances: ' + error.message);
       res.status(500).json({ error: 'Error fetching financial data' });
     }
   }
