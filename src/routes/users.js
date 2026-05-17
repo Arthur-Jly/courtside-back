@@ -83,17 +83,17 @@ module.exports = (db) => {
   router.put('/users/:id/profile', requireAuth, asyncHandler(async (req, res) => {
     const id = parseInt(req.params.id, 10);
     if (req.user.id !== id) return res.status(403).json({ error: 'Accès refusé' });
-    const { bio, city, level, birthdate, sports, is_public } = req.body;
+    const { bio, city, birthdate, sports, is_public } = req.body;
     const existing = await queryOne(db, 'SELECT user_id FROM user_profiles WHERE user_id = ?', [id]);
     if (existing) {
       await queryPromise(db,
-        'UPDATE user_profiles SET bio = ?, city = ?, level = ?, birthdate = ?, sports = ?, is_public = ?, updated_at = NOW() WHERE user_id = ?',
-        [bio || null, city || null, level || null, birthdate || null, sports || null, is_public ? 1 : 0, id]
+        'UPDATE user_profiles SET bio = ?, city = ?, birthdate = ?, sports = ?, is_public = ?, updated_at = NOW() WHERE user_id = ?',
+        [bio || null, city || null, birthdate || null, sports || null, is_public ? 1 : 0, id]
       );
     } else {
       await queryPromise(db,
-        'INSERT INTO user_profiles (user_id, bio, city, level, birthdate, sports, is_public, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())',
-        [id, bio || null, city || null, level || null, birthdate || null, sports || null, is_public ? 1 : 0]
+        'INSERT INTO user_profiles (user_id, bio, city, birthdate, sports, is_public, updated_at) VALUES (?, ?, ?, ?, ?, ?, NOW())',
+        [id, bio || null, city || null, birthdate || null, sports || null, is_public ? 1 : 0]
       );
     }
     res.json({ success: true });
