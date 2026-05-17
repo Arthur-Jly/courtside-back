@@ -33,11 +33,13 @@ const validate = (schema) => {
  */
 const schemas = {
   register: Joi.object({
-    name: Joi.string().min(2).max(100).required(),
+    first_name: Joi.string().min(2).max(50).required(),
+    last_name: Joi.string().min(2).max(50).required(),
     email: Joi.string().email().required(),
     password: Joi.string().min(6).max(100).required(),
     role: Joi.string().valid('player', 'club_admin').required(),
-    club_name: Joi.string().max(200).optional()
+    club_name: Joi.string().max(200).optional(),
+    username: Joi.string().alphanum().min(3).max(30).required(),
   }),
 
   login: Joi.object({

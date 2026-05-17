@@ -11,10 +11,16 @@ module.exports = (db, jwtSecret) => {
   const router = express.Router();
 
   router.post('/register', validate(schemas.register), asyncHandler(async (req, res) => {
-    const { name, email, password, role, club_name } = req.body;
+    const { first_name, last_name, email, password, role, club_name, username } = req.body;
+    const fullName = `${first_name.trim()} ${last_name.trim()}`;
 
     const existing = await queryOne(db, 'SELECT id FROM users WHERE email = ?', [email]);
     if (existing) throw new ConflictError('Cet email est déjà utilisé.');
+
+    if (username) {
+      const existingUsername = await queryOne(db, 'SELECT id FROM users WHERE username = ?', [username]);
+      if (existingUsername) throw new ConflictError('Ce pseudo est déjà pris.');
+    }
 
     const hash = await bcrypt.hash(password, 10);
 
@@ -26,15 +32,15 @@ module.exports = (db, jwtSecret) => {
 
     const userId = await insert(
       db,
-      'INSERT INTO users (name, email, password_hash, role, club_id, created_at) VALUES (?, ?, ?, ?, ?, NOW())',
-      [name, email, hash, role, club_id]
+      'INSERT INTO users (name, email, password_hash, role, club_id, username, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())',
+      [fullName, email, hash, role, club_id, username || null]
     );
 
-    const user = await queryOne(db, 'SELECT id, name, email, role, club_id FROM users WHERE id = ?', [userId]);
+    const user = await queryOne(db, 'SELECT id, name, email, role, club_id, username FROM users WHERE id = ?', [userId]);
     const token = jwt.sign({ id: user.id, role: user.role, name: user.name, club_id: user.club_id }, jwtSecret, { expiresIn: '2h' });
 
     logger.info(`Nouvel utilisateur inscrit: ${email}`);
-    res.json({ ...user, token });
+    res.json({ ...user, first_name: first_name.trim(), last_name: last_name.trim(), token });
   }));
 
   router.post('/login', validate(schemas.login), asyncHandler(async (req, res) => {

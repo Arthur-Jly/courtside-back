@@ -286,6 +286,9 @@ class AnnouncementsController {
       manual_date,
       manual_start_time,
       manual_end_time,
+      title,
+      manual_address,
+      manual_city,
     } = announcementData;
 
     console.log('🔍 createAnnouncement - Données reçues:', announcementData);
@@ -320,6 +323,9 @@ class AnnouncementsController {
         manual_date,
         manual_start_time,
         manual_end_time,
+        title,
+        manual_address,
+        manual_city,
       });
     } else {
       // CLUB PRIVÉ : Validation du slot
@@ -355,6 +361,9 @@ class AnnouncementsController {
       manual_date,
       manual_start_time,
       manual_end_time,
+      title,
+      manual_address,
+      manual_city,
     } = data;
 
     console.log('🏞️ Création annonce LIEU PUBLIC');
@@ -387,9 +396,9 @@ class AnnouncementsController {
     return new Promise((resolve, reject) => {
       // Créer l'annonce sans slot_id ni terrain_id
       const sql = `
-        INSERT INTO announcements 
-        (sport_type, slot_id, terrain_id, slot_start, slot_end, places_total, places_disponibles, description, created_by, visibility, status, public_place_id, expiration_date, auto_cancel, min_participants, created_at)
-        VALUES (?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, TRUE, 2, NOW())
+        INSERT INTO announcements
+        (sport_type, slot_id, terrain_id, slot_start, slot_end, places_total, places_disponibles, description, created_by, visibility, status, public_place_id, expiration_date, auto_cancel, min_participants, manual_address, manual_city, created_at)
+        VALUES (?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, TRUE, 2, ?, ?, NOW())
       `;
 
       const values = [
@@ -401,8 +410,10 @@ class AnnouncementsController {
         description || null,
         created_by,
         visibility,
-        public_place_id,
+        public_place_id || null,
         expirationStr,
+        manual_address || null,
+        manual_city || null,
       ];
 
       console.log('📝 Insertion annonce lieu public:', values);

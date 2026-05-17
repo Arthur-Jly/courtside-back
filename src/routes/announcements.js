@@ -223,7 +223,7 @@ module.exports = function(db) {
     } catch (err) {
       console.error('Erreur lors de la participation à l\'annonce:', err);
       
-      if (err.message.includes('déjà participant')) {
+      if (err.message.includes('déjà')) {
         res.status(409).json({ error: err.message });
       } else if (err.message.includes('Plus de places')) {
         res.status(400).json({ error: err.message });

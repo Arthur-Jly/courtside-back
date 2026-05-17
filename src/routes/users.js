@@ -70,6 +70,35 @@ module.exports = (db) => {
     res.json(users);
   }));
 
+  // Get user_profiles details
+  router.get('/users/:id/profile', asyncHandler(async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const user = await queryOne(db, 'SELECT id, name, username FROM users WHERE id = ?', [id]);
+    if (!user) throw new NotFoundError('Utilisateur non trouvé');
+    const profile = await queryOne(db, 'SELECT * FROM user_profiles WHERE user_id = ?', [id]);
+    res.json({ profile: profile ? { ...profile, user_name: user.name, username: user.username } : { user_id: id, user_name: user.name, username: user.username, is_public: 0 } });
+  }));
+
+  // Upsert user_profiles details
+  router.put('/users/:id/profile', requireAuth, asyncHandler(async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (req.user.id !== id) return res.status(403).json({ error: 'Accès refusé' });
+    const { bio, city, level, birthdate, sports, is_public } = req.body;
+    const existing = await queryOne(db, 'SELECT user_id FROM user_profiles WHERE user_id = ?', [id]);
+    if (existing) {
+      await queryPromise(db,
+        'UPDATE user_profiles SET bio = ?, city = ?, level = ?, birthdate = ?, sports = ?, is_public = ?, updated_at = NOW() WHERE user_id = ?',
+        [bio || null, city || null, level || null, birthdate || null, sports || null, is_public ? 1 : 0, id]
+      );
+    } else {
+      await queryPromise(db,
+        'INSERT INTO user_profiles (user_id, bio, city, level, birthdate, sports, is_public, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())',
+        [id, bio || null, city || null, level || null, birthdate || null, sports || null, is_public ? 1 : 0]
+      );
+    }
+    res.json({ success: true });
+  }));
+
   // Update user profile
   router.put('/users/:id', requireAuth, asyncHandler(async (req, res) => {
     const id = parseInt(req.params.id, 10);
