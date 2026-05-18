@@ -20,12 +20,14 @@ class AnnouncementsController {
     const { sport_type, status, club_id, user_id } = filters;
     
     let sql = `
-      SELECT a.*, 
+      SELECT a.*,
              u.name AS creator_name,
              t.name AS terrain_name,
              c.name AS club_name,
              c.id AS club_id,
-             c.address, c.city
+             c.address, c.city,
+             COALESCE(a.lat, c.lat) AS lat,
+             COALESCE(a.lng, c.lon) AS lng
     `;
     
     const params = [];
@@ -289,6 +291,8 @@ class AnnouncementsController {
       title,
       manual_address,
       manual_city,
+      lat,
+      lng,
     } = announcementData;
 
     console.log('🔍 createAnnouncement - Données reçues:', announcementData);
@@ -326,6 +330,8 @@ class AnnouncementsController {
         title,
         manual_address,
         manual_city,
+        lat,
+        lng,
       });
     } else {
       // CLUB PRIVÉ : Validation du slot
@@ -364,6 +370,8 @@ class AnnouncementsController {
       title,
       manual_address,
       manual_city,
+      lat,
+      lng,
     } = data;
 
     console.log('🏞️ Création annonce LIEU PUBLIC');
@@ -397,8 +405,8 @@ class AnnouncementsController {
       // Créer l'annonce sans slot_id ni terrain_id
       const sql = `
         INSERT INTO announcements
-        (sport_type, slot_id, terrain_id, slot_start, slot_end, places_total, places_disponibles, description, created_by, visibility, status, public_place_id, expiration_date, auto_cancel, min_participants, manual_address, manual_city, created_at)
-        VALUES (?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, TRUE, 2, ?, ?, NOW())
+        (sport_type, slot_id, terrain_id, slot_start, slot_end, places_total, places_disponibles, description, created_by, visibility, status, public_place_id, expiration_date, auto_cancel, min_participants, manual_address, manual_city, lat, lng, created_at)
+        VALUES (?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, TRUE, 2, ?, ?, ?, ?, NOW())
       `;
 
       const values = [
@@ -414,6 +422,8 @@ class AnnouncementsController {
         expirationStr,
         manual_address || null,
         manual_city || null,
+        lat != null ? Number(lat) : null,
+        lng != null ? Number(lng) : null,
       ];
 
       console.log('📝 Insertion annonce lieu public:', values);

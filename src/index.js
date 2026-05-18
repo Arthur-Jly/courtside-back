@@ -60,6 +60,9 @@ db.getConnection((err, conn) => {
     logger.error('MySQL connection error: ' + err.message);
     process.exit(1);
   }
+  // Add lat/lng columns to announcements if missing (idempotent)
+  conn.query('ALTER TABLE announcements ADD COLUMN lat DECIMAL(10,8) NULL', () => {});
+  conn.query('ALTER TABLE announcements ADD COLUMN lng DECIMAL(11,8) NULL', () => {});
   conn.release();
   logger.info('Connected to MySQL');
 });
