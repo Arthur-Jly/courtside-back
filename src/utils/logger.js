@@ -42,10 +42,11 @@ class Logger {
     };
 
     const colorFn = colors[level] || chalk.white;
+    const hasExtra = meta !== null && meta !== undefined && meta !== '';
     console.log(
       colorFn(`[${timestamp}] [${level.toUpperCase()}]`),
       message,
-      Object.keys(meta).length > 0 ? meta : ''
+      hasExtra ? meta : ''
     );
   }
 

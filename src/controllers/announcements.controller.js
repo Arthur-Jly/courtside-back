@@ -1,6 +1,7 @@
 /**
  * Contrôleur pour la gestion des annonces publiques et privées
  */
+const { logger } = require('../utils/logger');
 
 class AnnouncementsController {
   constructor(db) {
@@ -69,11 +70,11 @@ class AnnouncementsController {
 
     // Filtrage par club
     if (club_id) {
-      console.log('✅ Filtrage par club_id:', club_id);
+      logger.debug('✅ Filtrage par club_id:', club_id);
       sql += ' AND c.id = ?';
       params.push(parseInt(club_id));
     } else {
-      console.log('⚠️ Aucun club_id fourni - affichage de toutes les annonces');
+      logger.debug('⚠️ Aucun club_id fourni - affichage de toutes les annonces');
     }
 
     // Filtrage par sport
@@ -93,16 +94,16 @@ class AnnouncementsController {
 
     sql += ' ORDER BY a.created_at DESC';
 
-    console.log('📝 SQL final:', sql);
-    console.log('📝 Paramètres:', params);
+    logger.debug('📝 SQL final:', sql);
+    logger.debug('📝 Paramètres:', params);
 
     return new Promise((resolve, reject) => {
       this.db.query(sql, params, (err, announcements) => {
         if (err) {
-          console.error('❌ Erreur SQL:', err);
+          logger.error('❌ Erreur SQL:', err);
           reject(err);
         } else {
-          console.log(`✅ ${announcements.length} annonces trouvées`);
+          logger.debug(`✅ ${announcements.length} annonces trouvées`);
           
           // Convertir les dates en strings SANS changer de timezone
           const formattedAnnouncements = announcements.map(announcement => {
@@ -126,14 +127,7 @@ class AnnouncementsController {
             };
           });
           
-          if (formattedAnnouncements.length > 0) {
-            console.log('Première annonce - Club:', formattedAnnouncements[0].club_name, '(ID:', formattedAnnouncements[0].club_id, ')');
-            console.log('Première annonce - slot_start:', formattedAnnouncements[0].slot_start);
-            console.log('Première annonce - slot_end:', formattedAnnouncements[0].slot_end);
-            if (user_id) {
-              console.log('User has joined first announcement:', formattedAnnouncements[0].user_has_joined > 0);
-            }
-          }
+          logger.debug(`${formattedAnnouncements.length} annonces retournées`);
           resolve(formattedAnnouncements);
         }
       });
@@ -295,7 +289,7 @@ class AnnouncementsController {
       lng,
     } = announcementData;
 
-    console.log('🔍 createAnnouncement - Données reçues:', announcementData);
+    logger.debug('🔍 createAnnouncement - Données reçues:', announcementData);
 
     // Validation de base
     if (!sport_type || !places_total || !created_by) {
@@ -374,7 +368,7 @@ class AnnouncementsController {
       lng,
     } = data;
 
-    console.log('🏞️ Création annonce LIEU PUBLIC');
+    logger.debug('🏞️ Création annonce LIEU PUBLIC');
 
     // Formater les dates/heures
     const slotStart = `${manual_date} ${manual_start_time}:00`;
@@ -399,7 +393,7 @@ class AnnouncementsController {
     }
     const expirationStr = expirationDate.toISOString().slice(0, 19).replace('T', ' ');
 
-    console.log('📅 Dates formatées:', { slotStart, slotEnd, expirationDate: expirationStr });
+    logger.debug('📅 Dates formatées:', { slotStart, slotEnd, expirationDate: expirationStr });
 
     return new Promise((resolve, reject) => {
       // Créer l'annonce sans slot_id ni terrain_id
@@ -426,36 +420,36 @@ class AnnouncementsController {
         lng != null ? Number(lng) : null,
       ];
 
-      console.log('📝 Insertion annonce lieu public:', values);
+      logger.debug('📝 Insertion annonce lieu public:', values);
 
       this.db.query(sql, values, async (err, result) => {
         if (err) {
-          console.error('❌ Erreur insertion annonce lieu public:', err);
+          logger.error('❌ Erreur insertion annonce lieu public:', err);
           reject(err);
           return;
         }
 
         const announcementId = result.insertId;
-        console.log('✅ Annonce lieu public créée avec l\'ID:', announcementId);
+        logger.debug('✅ Annonce lieu public créée avec l\'ID:', announcementId);
 
         try {
           // Ajouter le créateur comme participant
           await this.addParticipant(announcementId, created_by, 'creator');
-          console.log('✅ Créateur ajouté comme participant');
+          logger.debug('✅ Créateur ajouté comme participant');
 
           // Si annonce privée avec invités
           if (visibility === 'private' && invited_users && invited_users.length > 0) {
-            console.log(`📨 Envoi des invitations à ${invited_users.length} amis`);
+            logger.debug(`📨 Envoi des invitations à ${invited_users.length} amis`);
             await this.inviteFriendsWithMessages(announcementId, created_by, invited_users);
-            console.log('✅ Invitations envoyées');
+            logger.debug('✅ Invitations envoyées');
           }
 
           // Récupérer l'annonce créée
           const announcement = await this.getAnnouncementById(announcementId, created_by);
-          console.log('✅ Annonce lieu public complète récupérée');
+          logger.debug('✅ Annonce lieu public complète récupérée');
           resolve(announcement);
         } catch (err2) {
-          console.error('❌ Erreur post-création:', err2);
+          logger.error('❌ Erreur post-création:', err2);
           reject(err2);
         }
       });
@@ -477,7 +471,7 @@ class AnnouncementsController {
       invited_users,
     } = data;
 
-    console.log('🏢 Création annonce CLUB PRIVÉ');
+    logger.debug('🏢 Création annonce CLUB PRIVÉ');
 
     return new Promise((resolve, reject) => {
       // Vérifier que le slot existe et est disponible
@@ -486,21 +480,21 @@ class AnnouncementsController {
         [slot_id, 'free'],
         async (err, slots) => {
           if (err) {
-            console.error('❌ Erreur lors de la vérification du slot:', err);
+            logger.error('❌ Erreur lors de la vérification du slot:', err);
             reject(err);
             return;
           }
 
-          console.log(`📊 Slots trouvés pour id=${slot_id}:`, slots.length);
+          logger.debug(`📊 Slots trouvés pour id=${slot_id}:`, slots.length);
 
           if (slots.length === 0) {
-            console.warn(`⚠️ Slot ${slot_id} non trouvé ou pas disponible`);
+            logger.warn(`⚠️ Slot ${slot_id} non trouvé ou pas disponible`);
             reject(new Error('Ce créneau n\'est plus disponible'));
             return;
           }
 
           const slot = slots[0];
-          console.log('✅ Slot trouvé:', slot);
+          logger.debug('✅ Slot trouvé:', slot);
 
           const formatLocalDate = (dateValue) => {
             if (!dateValue) return null;
@@ -517,7 +511,7 @@ class AnnouncementsController {
           const slotStart = `${slotDate} ${slot.start_time}`;
           const slotEnd = `${slotDate} ${slot.end_time}`;
 
-          console.log('📅 Dates formatées:', { slotDate, slotStart, slotEnd });
+          logger.debug('📅 Dates formatées:', { slotDate, slotStart, slotEnd });
 
           // Calculer la date d'expiration
           // Priorité : 24h avant le slot > NOW + 3h > slot_start (si match très proche)
@@ -537,7 +531,7 @@ class AnnouncementsController {
             expirationDate = slotStartDate;
           }
           const expirationStr = expirationDate.toISOString().slice(0, 19).replace('T', ' ');
-          console.log('⏰ Date d\'expiration:', expirationStr, '(idéale:', idealExpiration.toISOString(), ')');
+          logger.debug(`Date d'expiration: ${expirationStr}`);
 
           // Créer l'annonce
           const sql = `
@@ -560,17 +554,17 @@ class AnnouncementsController {
             expirationStr
           ];
 
-          console.log('📝 Insertion de l\'annonce avec les valeurs:', values);
+          logger.debug('📝 Insertion de l\'annonce avec les valeurs:', values);
 
           this.db.query(sql, values, async (err2, result) => {
             if (err2) {
-              console.error('❌ Erreur lors de l\'insertion de l\'annonce:', err2);
+              logger.error('❌ Erreur lors de l\'insertion de l\'annonce:', err2);
               reject(err2);
               return;
             }
 
             const announcementId = result.insertId;
-            console.log('✅ Annonce créée avec l\'ID:', announcementId);
+            logger.debug('✅ Annonce créée avec l\'ID:', announcementId);
 
             // Marquer le slot comme réservé pour annonce
             this.db.query(
@@ -578,31 +572,31 @@ class AnnouncementsController {
               ['reserved_announcement', slot_id],
               async (err3) => {
                 if (err3) {
-                  console.error('❌ Erreur lors de la mise à jour du slot:', err3);
+                  logger.error('❌ Erreur lors de la mise à jour du slot:', err3);
                   reject(err3);
                   return;
                 }
 
-                console.log('✅ Slot mis à jour en reserved_announcement');
+                logger.debug('✅ Slot mis à jour en reserved_announcement');
 
                 try {
                   // Ajouter le créateur comme participant
                   await this.addParticipant(announcementId, created_by, 'creator');
-                  console.log('✅ Créateur ajouté comme participant');
+                  logger.debug('✅ Créateur ajouté comme participant');
 
                   // Si annonce privée avec invités, créer les invitations et envoyer les messages
                   if (visibility === 'private' && invited_users && invited_users.length > 0) {
-                    console.log(`📨 Envoi des invitations à ${invited_users.length} amis`);
+                    logger.debug(`📨 Envoi des invitations à ${invited_users.length} amis`);
                     await this.inviteFriendsWithMessages(announcementId, created_by, invited_users);
-                    console.log('✅ Invitations envoyées avec succès');
+                    logger.debug('✅ Invitations envoyées avec succès');
                   }
 
                   // Récupérer l'annonce créée
                   const announcement = await this.getAnnouncementById(announcementId, created_by);
-                  console.log('✅ Annonce complète récupérée');
+                  logger.debug('✅ Annonce complète récupérée');
                   resolve(announcement);
                 } catch (err4) {
-                  console.error('❌ Erreur lors de l\'ajout du participant ou récupération:', err4);
+                  logger.error('❌ Erreur lors de l\'ajout du participant ou récupération:', err4);
                   reject(err4);
                 }
               }
@@ -811,74 +805,73 @@ class AnnouncementsController {
    * @returns {Promise<Object>}
    */
   async cancelAnnouncement(announcementId, userId) {
-    return new Promise((resolve, reject) => {
-      // Vérifier que l'annonce existe et que l'utilisateur est le créateur
-      this.db.query(
-        'SELECT * FROM announcements WHERE id = ?',
-        [announcementId],
-        (err, announcements) => {
-          if (err) {
-            reject(err);
-            return;
-          }
+    const { queryPromise, queryOne, insert } = require('../utils/dbHelpers');
+    const db = this.db;
 
-          if (announcements.length === 0) {
-            reject(new Error('Annonce introuvable'));
-            return;
-          }
+    const announcements = await queryPromise(db,
+      'SELECT * FROM announcements WHERE id = ?', [announcementId]);
+    if (announcements.length === 0) throw new Error('Annonce introuvable');
 
-          const announcement = announcements[0];
+    const announcement = announcements[0];
+    if (announcement.created_by !== userId) throw new Error('Seul le créateur peut annuler une annonce');
 
-          if (announcement.created_by !== userId) {
-            reject(new Error('Seul le créateur peut annuler une annonce'));
-            return;
-          }
+    // 1. Récupérer les participants AVANT suppression (hors créateur)
+    const participants = await queryPromise(db,
+      'SELECT user_id FROM annonce_participants WHERE annonce_id = ? AND user_id != ?',
+      [announcementId, userId]);
 
-          // 1. Mettre le status à 'cancelled'
-          this.db.query(
-            'UPDATE announcements SET status = ? WHERE id = ?',
-            ['cancelled', announcementId],
-            (err2) => {
-              if (err2) {
-                reject(err2);
-                return;
-              }
+    // 2. Notifier chaque participant via messagerie privée
+    const title = announcement.title || announcement.sport_type || 'Session';
+    const dateStr = announcement.slot_start
+      ? new Date(announcement.slot_start).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })
+      : announcement.manual_date || '';
+    const msg = `⚠️ La session « ${title} » du ${dateStr} a été annulée par l'organisateur.`;
 
-              // 2. Libérer le slot (remettre à 'free')
-              if (announcement.slot_id) {
-                this.db.query(
-                  'UPDATE slots SET status = ? WHERE id = ?',
-                  ['free', announcement.slot_id],
-                  (err3) => {
-                    if (err3) {
-                      console.error('Erreur lors de la libération du slot:', err3);
-                      // On continue quand même
-                    }
-                  }
-                );
-              }
+    for (const p of participants) {
+      try {
+        let chat = await queryOne(db, `
+          SELECT c.id FROM chats c
+          WHERE c.type = 'private'
+            AND c.id IN (SELECT chat_id FROM chat_participants WHERE user_id = ?)
+            AND c.id IN (SELECT chat_id FROM chat_participants WHERE user_id = ?)
+          LIMIT 1
+        `, [userId, p.user_id]);
 
-              // 3. Supprimer tous les participants
-              this.db.query(
-                'DELETE FROM annonce_participants WHERE annonce_id = ?',
-                [announcementId],
-                (err4) => {
-                  if (err4) {
-                    console.error('Erreur lors de la suppression des participants:', err4);
-                    // On continue quand même
-                  }
-
-                  // Récupérer l'annonce mise à jour
-                  this.getAnnouncementById(announcementId, userId)
-                    .then(updatedAnnouncement => resolve(updatedAnnouncement))
-                    .catch(err5 => reject(err5));
-                }
-              );
-            }
-          );
+        if (!chat) {
+          const chatId = await insert(db,
+            "INSERT INTO chats (type, created_at) VALUES ('private', NOW())");
+          await queryPromise(db, `
+            INSERT INTO chat_participants (chat_id, user_id, role, joined_at, last_read_at)
+            VALUES (?, ?, 'member', NOW(), NOW()), (?, ?, 'member', NOW(), NOW())
+          `, [chatId, userId, chatId, p.user_id]);
+          chat = { id: chatId };
         }
-      );
-    });
+
+        await insert(db,
+          'INSERT INTO messages (chat_id, sender_id, content, created_at) VALUES (?, ?, ?, NOW())',
+          [chat.id, userId, msg]);
+      } catch (e) {
+        logger.error('Erreur notification annulation participant', { userId: p.user_id, err: e.message });
+      }
+    }
+
+    // 3. Mettre le status à 'cancelled'
+    await queryPromise(db,
+      'UPDATE announcements SET status = ? WHERE id = ?', ['cancelled', announcementId]);
+
+    // 4. Libérer le slot
+    if (announcement.slot_id) {
+      await queryPromise(db,
+        'UPDATE slots SET status = ? WHERE id = ?', ['free', announcement.slot_id])
+        .catch(e => logger.error('Erreur libération slot', { err: e.message }));
+    }
+
+    // 5. Supprimer les participants
+    await queryPromise(db,
+      'DELETE FROM annonce_participants WHERE annonce_id = ?', [announcementId])
+      .catch(e => logger.error('Erreur suppression participants', { err: e.message }));
+
+    return this.getAnnouncementById(announcementId, userId);
   }
 
   /**
@@ -1289,7 +1282,7 @@ class AnnouncementsController {
     return new Promise((resolve, reject) => {
       const start = startDate || new Date().toISOString().split('T')[0];
       
-      console.log('🔍 getAvailableSlots - Paramètres:', { sportType, startDate: start, days, clubId });
+      logger.debug('🔍 getAvailableSlots - Paramètres:', { sportType, startDate: start, days, clubId });
       
       let sql = `
         SELECT s.*, 
@@ -1322,12 +1315,12 @@ class AnnouncementsController {
 
       this.db.query(sql, params, (err, slots) => {
         if (err) {
-          console.error('❌ Erreur lors de la récupération des créneaux:', err);
+          logger.error('❌ Erreur lors de la récupération des créneaux:', err);
           reject(err);
         } else {
-          console.log(`✅ ${slots.length} créneaux trouvés pour ${sportType}${clubId ? ` dans le club ${clubId}` : ''}`);
+          logger.debug(`✅ ${slots.length} créneaux trouvés pour ${sportType}${clubId ? ` dans le club ${clubId}` : ''}`);
           if (slots.length > 0) {
-            console.log('Premier créneau:', slots[0]);
+            logger.debug('Premier créneau:', slots[0]);
           }
           const formatLocalDate = (dateValue) => {
             if (!dateValue) return null;
@@ -1357,12 +1350,12 @@ class AnnouncementsController {
    * @returns {Promise<Array>}
    */
   async inviteFriendsWithMessages(announcementId, invitedBy, userIds) {
-    console.log(`📧 inviteFriendsWithMessages - Annonce: ${announcementId}, Inviteur: ${invitedBy}, Invités:`, userIds);
+    logger.debug(`inviteFriendsWithMessages - annonce ${announcementId}, inviteur ${invitedBy}, ${userIds.length} invités`);
     
     try {
       // Créer les invitations (utilise la méthode existante)
       const invitations = await this.inviteFriends(announcementId, invitedBy, userIds);
-      console.log(`✅ ${invitations.length} invitations créées`);
+      logger.debug(`✅ ${invitations.length} invitations créées`);
 
       // Récupérer les détails de l'annonce pour le message
       const announcement = await this.getAnnouncementById(announcementId, invitedBy);
@@ -1372,20 +1365,20 @@ class AnnouncementsController {
         try {
           // Trouver ou créer un chat privé
           const chatId = await this.getOrCreatePrivateChat(invitedBy, invitation.user_id);
-          console.log(`💬 Chat ${chatId} créé/trouvé pour user ${invitation.user_id}`);
+          logger.debug(`💬 Chat ${chatId} créé/trouvé pour user ${invitation.user_id}`);
           
           // Envoyer le message d'invitation
           await this.sendInvitationMessage(chatId, invitedBy, invitation, announcement);
-          console.log(`✅ Message d'invitation envoyé à user ${invitation.user_id}`);
+          logger.debug(`✅ Message d'invitation envoyé à user ${invitation.user_id}`);
         } catch (msgErr) {
-          console.error(`❌ Erreur envoi message pour user ${invitation.user_id}:`, msgErr);
+          logger.error(`❌ Erreur envoi message pour user ${invitation.user_id}:`, msgErr);
           // Continue même si un message échoue
         }
       }
 
       return invitations;
     } catch (error) {
-      console.error('❌ Erreur dans inviteFriendsWithMessages:', error);
+      logger.error('❌ Erreur dans inviteFriendsWithMessages:', error);
       throw error;
     }
   }
@@ -1586,7 +1579,7 @@ class AnnouncementsController {
   async getLastMinuteAnnouncements(filters = {}) {
     const { sport_type, location, user_id, hours_until_expiration = 48 } = filters;
     
-    console.log('🔥 getLastMinuteAnnouncements - Filtres reçus:', filters);
+    logger.debug('🔥 getLastMinuteAnnouncements - Filtres reçus:', filters);
     
     let sql = `
       SELECT a.*, 
@@ -1663,16 +1656,16 @@ class AnnouncementsController {
     // Trier par expiration la plus proche d'abord
     sql += ' ORDER BY a.expiration_date ASC';
 
-    console.log('📝 SQL last minute:', sql);
-    console.log('📝 Paramètres:', params);
+    logger.debug('📝 SQL last minute:', sql);
+    logger.debug('📝 Paramètres:', params);
 
     return new Promise((resolve, reject) => {
       this.db.query(sql, params, (err, announcements) => {
         if (err) {
-          console.error('❌ Erreur SQL getLastMinuteAnnouncements:', err);
+          logger.error('❌ Erreur SQL getLastMinuteAnnouncements:', err);
           reject(err);
         } else {
-          console.log(`🔥 ${announcements.length} annonces last minute trouvées`);
+          logger.debug(`🔥 ${announcements.length} annonces last minute trouvées`);
           
           // Formater les dates
           const formattedAnnouncements = announcements.map(announcement => {
@@ -1709,7 +1702,7 @@ class AnnouncementsController {
    * @returns {Promise<Object>} Statistiques sur les annonces annulées
    */
   async checkAndCancelExpiredAnnouncements() {
-    console.log('🔍 Vérification des annonces expirées...');
+    logger.debug('🔍 Vérification des annonces expirées...');
     
     return new Promise((resolve, reject) => {
       // Trouver les annonces expirées avec auto_cancel activé
@@ -1726,12 +1719,12 @@ class AnnouncementsController {
 
       this.db.query(sql, [], async (err, announcements) => {
         if (err) {
-          console.error('❌ Erreur lors de la récupération des annonces expirées:', err);
+          logger.error('❌ Erreur lors de la récupération des annonces expirées:', err);
           reject(err);
           return;
         }
 
-        console.log(`📊 ${announcements.length} annonces expirées trouvées`);
+        logger.debug(`📊 ${announcements.length} annonces expirées trouvées`);
 
         const cancelledAnnouncements = [];
         const keptAnnouncements = [];
@@ -1741,7 +1734,7 @@ class AnnouncementsController {
           
           // Si pas assez de participants, annuler
           if (participant_count < min_participants) {
-            console.log(`❌ Annonce ${id}: ${participant_count}/${min_participants} participants - ANNULATION`);
+            logger.debug(`❌ Annonce ${id}: ${participant_count}/${min_participants} participants - ANNULATION`);
             
             try {
               // Annuler l'annonce
@@ -1766,15 +1759,15 @@ class AnnouncementsController {
 
               cancelledAnnouncements.push(id);
             } catch (error) {
-              console.error(`❌ Erreur lors de l'annulation de l'annonce ${id}:`, error);
+              logger.error(`❌ Erreur lors de l'annulation de l'annonce ${id}:`, error);
             }
           } else {
-            console.log(`✅ Annonce ${id}: ${participant_count}/${min_participants} participants - CONSERVÉE`);
+            logger.debug(`✅ Annonce ${id}: ${participant_count}/${min_participants} participants - CONSERVÉE`);
             keptAnnouncements.push(id);
           }
         }
 
-        console.log(`✅ Résultat: ${cancelledAnnouncements.length} annulées, ${keptAnnouncements.length} conservées`);
+        logger.debug(`✅ Résultat: ${cancelledAnnouncements.length} annulées, ${keptAnnouncements.length} conservées`);
 
         resolve({
           checked: announcements.length,
