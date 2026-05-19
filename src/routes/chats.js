@@ -53,7 +53,7 @@ module.exports = (db) => {
   router.get('/chats', requireAuth, asyncHandler(async (req, res) => {
     const userId = req.user.id;
     const sql = `
-      SELECT c.id, c.type, c.created_at, c.closed_at,
+      SELECT c.id, c.type, c.status as chat_status, c.created_at, c.closed_at,
         CASE WHEN c.type = 'private' THEN (
           SELECT u.name FROM chat_participants cp2 JOIN users u ON cp2.user_id = u.id
           WHERE cp2.chat_id = c.id AND cp2.user_id != ? LIMIT 1
@@ -165,13 +165,34 @@ module.exports = (db) => {
     `, [userId1, otherId]);
     if (existing) return res.json(existing);
 
-    const chatId = await insert(db, "INSERT INTO chats (type, created_at) VALUES ('private', NOW())");
+    const friendship = await queryOne(db, `
+      SELECT status FROM amis
+      WHERE ((user_id_1 = ? AND user_id_2 = ?) OR (user_id_1 = ? AND user_id_2 = ?))
+        AND status = 'accepted'
+    `, [userId1, otherId, otherId, userId1]);
+    const chatStatus = friendship ? 'accepted' : 'pending';
+
+    const chatId = await insert(db,
+      "INSERT INTO chats (type, status, created_at) VALUES ('private', ?, NOW())",
+      [chatStatus]
+    );
     await queryPromise(db, `
       INSERT INTO chat_participants (chat_id, user_id, role, joined_at, last_read_at)
       VALUES (?, ?, 'member', NOW(), NOW()), (?, ?, 'member', NOW(), NOW())
     `, [chatId, userId1, chatId, otherId]);
     const chat = await queryOne(db, 'SELECT * FROM chats WHERE id = ?', [chatId]);
     res.json(chat);
+  }));
+
+  router.put('/chats/:chat_id/accept', requireAuth, asyncHandler(async (req, res) => {
+    const chatId = Number(req.params.chat_id);
+    if (!Number.isFinite(chatId)) return res.status(400).json({ error: 'chat_id invalide' });
+    await assertChatMember(db, chatId, req.user.id);
+    await queryPromise(db,
+      "UPDATE chats SET status = 'accepted' WHERE id = ? AND status = 'pending'",
+      [chatId]
+    );
+    res.json({ success: true });
   }));
 
   router.post('/chats/:chat_id/messages', requireAuth, upload.single('file'), asyncHandler(async (req, res) => {

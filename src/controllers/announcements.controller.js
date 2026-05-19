@@ -944,6 +944,29 @@ class AnnouncementsController {
   }
 
   /**
+   * Partage une session (publique ou privée) avec des utilisateurs via message.
+   * Pas de restriction de visibilité ni de vérification d'amitié.
+   */
+  async shareSession(announcementId, sharedBy, userIds) {
+    const announcement = await this.getAnnouncementById(announcementId, sharedBy);
+    if (!announcement) throw new Error('Annonce introuvable');
+
+    const results = [];
+    for (const userId of userIds) {
+      try {
+        const chatId = await this.getOrCreatePrivateChat(sharedBy, userId);
+        const fakeInvitation = { id: null, user_id: userId };
+        await this.sendInvitationMessage(chatId, sharedBy, fakeInvitation, announcement);
+        results.push({ userId, success: true });
+      } catch (err) {
+        logger.error(`Erreur partage session pour user ${userId}:`, err);
+        results.push({ userId, success: false });
+      }
+    }
+    return results;
+  }
+
+  /**
    * Vérifie si deux utilisateurs sont amis
    * @param {number} userId1 - ID du premier utilisateur
    * @param {number} userId2 - ID du second utilisateur

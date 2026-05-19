@@ -126,8 +126,8 @@ module.exports = function (db) {
       return res.status(400).json({ error: 'userIds requis (max 50)' });
     }
     try {
-      const invitations = await controller.inviteFriends(id, req.user.id, userIds.map(Number).filter(Number.isFinite));
-      res.status(201).json({ success: true, invitations, count: invitations.length });
+      const results = await controller.shareSession(id, req.user.id, userIds.map(Number).filter(Number.isFinite));
+      res.status(201).json({ success: true, results, count: results.length });
     } catch (err) {
       throw classifyKnownError(err);
     }
