@@ -62,6 +62,10 @@ module.exports = (db) => {
           SELECT u.avatar FROM chat_participants cp2 JOIN users u ON cp2.user_id = u.id
           WHERE cp2.chat_id = c.id AND cp2.user_id != ? LIMIT 1
         ) ELSE NULL END as avatar,
+        CASE WHEN c.type = 'private' THEN (
+          SELECT cp2.user_id FROM chat_participants cp2
+          WHERE cp2.chat_id = c.id AND cp2.user_id != ? LIMIT 1
+        ) ELSE NULL END as other_user_id,
         (SELECT m.content FROM messages m WHERE m.chat_id = c.id ORDER BY m.created_at DESC LIMIT 1) as lastMessage,
         (SELECT m.created_at FROM messages m WHERE m.chat_id = c.id ORDER BY m.created_at DESC LIMIT 1) as lastMessageTime,
         (SELECT COUNT(*) FROM messages m
@@ -78,7 +82,7 @@ module.exports = (db) => {
       ) DESC
       LIMIT 200
     `;
-    const chats = await queryPromise(db, sql, [userId, userId, userId, userId, userId]);
+    const chats = await queryPromise(db, sql, [userId, userId, userId, userId, userId, userId]);
     res.json(chats);
   }));
 
