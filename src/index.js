@@ -63,6 +63,9 @@ db.getConnection((err, conn) => {
   // Add lat/lng columns to announcements if missing (idempotent)
   conn.query('ALTER TABLE announcements ADD COLUMN lat DECIMAL(10,8) NULL', () => {});
   conn.query('ALTER TABLE announcements ADD COLUMN lng DECIMAL(11,8) NULL', () => {});
+  // Stripe idempotence key on reservations (idempotent)
+  conn.query('ALTER TABLE reservations ADD COLUMN stripe_session_id VARCHAR(120) NULL', () => {});
+  conn.query('ALTER TABLE reservations ADD UNIQUE INDEX uq_reservations_stripe_session (stripe_session_id)', () => {});
   conn.release();
   logger.info('Connected to MySQL');
 });

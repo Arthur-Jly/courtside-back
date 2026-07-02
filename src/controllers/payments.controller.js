@@ -60,9 +60,9 @@ module.exports = function (db) {
       quantity: 1,
     }];
 
-    const baseUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-    const successUrl = `${baseUrl}/?payment_session={CHECKOUT_SESSION_ID}`;
-    const cancelUrl = `${baseUrl}/?payment=canceled`;
+    const baseUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    const successUrl = `${baseUrl}/paiement/succes?session_id={CHECKOUT_SESSION_ID}`;
+    const cancelUrl = `${baseUrl}/paiement/annule`;
 
     const metadataPayload = {
       reservationData: JSON.stringify(reservationData).slice(0, 4000),
@@ -130,6 +130,17 @@ module.exports = function (db) {
       return;
     }
     try {
+      // Idempotence: the webhook and the confirm-payment fallback can both fire
+      // for the same Checkout session — only the first one may create the reservation.
+      const [existing] = await pool.query(
+        'SELECT id FROM reservations WHERE stripe_session_id = ? LIMIT 1',
+        [session.id]
+      );
+      if (existing?.length > 0) {
+        logger.info(`Session ${session.id} already processed (reservation ${existing[0].id})`);
+        return;
+      }
+
       const metadata = session.metadata || {};
       const reservationData = metadata.reservationData ? JSON.parse(metadata.reservationData) : {};
       const slotIdFromMetadata = metadata.slotId ? Number(metadata.slotId) : reservationData.slotId;
@@ -199,8 +210,8 @@ module.exports = function (db) {
       const endDateTime = `${date} ${normalizedEnd}`;
 
       const [reservationResult] = await pool.query(
-        'INSERT INTO reservations (user_id, terrain_id, start_time, end_time, price, status, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())',
-        [userId, terrainId, startDateTime, endDateTime, splitPayment ? pricePerPerson : totalPrice, 'confirmed']
+        'INSERT INTO reservations (user_id, terrain_id, start_time, end_time, price, status, stripe_session_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())',
+        [userId, terrainId, startDateTime, endDateTime, splitPayment ? pricePerPerson : totalPrice, 'confirmed', session.id]
       );
       const reservationId = reservationResult.insertId;
 
