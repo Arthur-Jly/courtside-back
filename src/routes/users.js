@@ -12,6 +12,35 @@ module.exports = (db) => {
     return Number.isFinite(v) ? v : null;
   };
 
+  // RGPD account deletion: purge personal data, anonymize what must stay
+  // for other users' history (messages, past sessions).
+  router.delete('/users/me', requireAuth, asyncHandler(async (req, res) => {
+    const userId = req.user.id;
+
+    const purge = async (sql, params) => {
+      try { await queryPromise(db, sql, params); } catch { /* table/rows may not exist */ }
+    };
+
+    await purge('DELETE FROM favorites WHERE user_id = ?', [userId]);
+    await purge('DELETE FROM amis WHERE user_id_1 = ? OR user_id_2 = ?', [userId, userId]);
+    await purge('DELETE FROM annonce_invitations WHERE user_id = ? OR invited_by = ?', [userId, userId]);
+    await purge('DELETE FROM password_resets WHERE user_id = ?', [userId]);
+    await purge('DELETE FROM annonce_participants WHERE user_id = ?', [userId]);
+
+    // Anonymize the account: keeps FK integrity, kills login and PII.
+    await queryPromise(db, `
+      UPDATE users SET
+        name = 'Utilisateur supprimé',
+        email = CONCAT('deleted-', id, '@deleted.invalid'),
+        username = NULL,
+        password_hash = 'account-deleted',
+        avatar = NULL
+      WHERE id = ?
+    `, [userId]);
+
+    res.json({ success: true });
+  }));
+
   router.post('/favorites', requireAuth, validate(schemas.addFavorite), asyncHandler(async (req, res) => {
     const user_id = req.user.id;
     const { terrain_id } = req.body;

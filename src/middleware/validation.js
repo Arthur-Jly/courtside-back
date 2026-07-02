@@ -42,6 +42,15 @@ const schemas = {
     password: Joi.string().min(1).max(128).required(),
   }),
 
+  forgotPassword: Joi.object({
+    email: Joi.string().email().max(254).lowercase().required(),
+  }),
+
+  resetPassword: Joi.object({
+    token: Joi.string().hex().length(64).required(),
+    password,
+  }),
+
   addFavorite: Joi.object({
     terrain_id: id.required(),
   }),
