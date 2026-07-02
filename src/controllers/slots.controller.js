@@ -49,7 +49,7 @@ async function generateSlotsForTerrain(terrainId, fromDate, toDate, slotDuration
   const recs = raRows || [];
 
   const [trows] = await pool.query('SELECT club_id FROM `terrains` WHERE id = ?', [terrainId]);
-  const clubId = (trows && trows[0]) ? trows[0].club_id : null;
+  let clubId = (trows && trows[0]) ? trows[0].club_id : null;
 
   let durationMinutes = slotDurationMinutes;
   if (!durationMinutes) {
@@ -249,14 +249,19 @@ async function listSlots(req, res){
   const date = req.query.date; // optional
   const status = req.query.status; // optional
   const params = [terrainId];
-  let sql = 'SELECT * FROM slots WHERE terrain_id = ?';
-  
-  // TOUJOURS filtrer pour ne retourner que les dates futures ou aujourd'hui
-  sql += ' AND date >= CURDATE()';
-  
-  if(date){ sql += ' AND date = ?'; params.push(date); }
-  if(status){ sql += ' AND status = ?'; params.push(status); }
-  sql += ' ORDER BY date, start_time';
+  let sql = `
+    SELECT s.*, t.name as terrain_name, t.sport_type, t.club_id
+    FROM slots s
+    JOIN terrains t ON s.terrain_id = t.id
+    WHERE s.terrain_id = ?
+  `;
+
+  // Never surface past days to the booking UI.
+  sql += ' AND s.date >= CURDATE()';
+
+  if(date){ sql += ' AND DATE(s.date) = ?'; params.push(date); }
+  if(status){ sql += ' AND s.status = ?'; params.push(status); }
+  sql += ' ORDER BY s.date, s.start_time';
   const [rows] = await pool.query(sql, params);
   res.json(rows || []);
 }
@@ -264,28 +269,28 @@ async function listSlots(req, res){
 async function listSlotsByClub(req, res){
   const clubId = req.params.id;
   const date = req.query.date; // optional
-  const status = req.query.status; // optional - par défaut 'free' si non spécifié
+  const status = req.query.status; // optional — defaults to 'free'
   const params = [clubId];
-  let sql = 'SELECT * FROM slots WHERE club_id = ?';
-  
-  // TOUJOURS filtrer pour ne retourner que les dates futures ou aujourd'hui
-  sql += ' AND date >= CURDATE()';
-  
-  if(date){ sql += ' AND date = ?'; params.push(date); }
-  
-  // Si status n'est pas spécifié, retourner seulement les slots 'free' par défaut
-  if(status){
-    sql += ' AND status = ?';
-    params.push(status);
-  } else {
-    // Par défaut, ne retourner que les slots disponibles
-    sql += ' AND status = ?';
-    params.push('free');
+  let sql = `
+    SELECT s.*, t.name as terrain_name, t.sport_type, t.club_id
+    FROM slots s
+    JOIN terrains t ON s.terrain_id = t.id
+    WHERE t.club_id = ?
+  `;
+
+  // Never surface past days to the booking UI.
+  sql += ' AND s.date >= CURDATE()';
+
+  if(date){ sql += ' AND DATE(s.date) = ?'; params.push(date); }
+
+  // Default to available slots only; pass status=all to disable.
+  const effectiveStatus = status || 'free';
+  if(effectiveStatus !== 'all'){
+    sql += ' AND s.status = ?';
+    params.push(effectiveStatus);
   }
-  
-  sql += ' ORDER BY date, start_time';
-  console.log('🔍 [listSlotsByClub] SQL:', sql);
-  console.log('🔍 [listSlotsByClub] Params:', params);
+
+  sql += ' ORDER BY s.date, s.start_time, t.name';
   const [rows] = await pool.query(sql, params);
   console.log(`✅ [listSlotsByClub] ${rows.length} slots retournés`);
   if (rows.length > 0) {
@@ -490,64 +495,6 @@ async function adminCleanupSlots(req, res){
   const cutoff = new Date(Date.now() - keepDays*24*60*60*1000).toISOString().slice(0,10);
   await pool.query('DELETE FROM slots WHERE date < ? AND club_id = ?', [cutoff, adminClubId]);
   res.json({ ok:true, cutoff });
-}
-
-// GET /terrains/:id/slots - List slots for a terrain with terrain details
-async function listSlots(req, res){
-  try {
-    const terrainId = req.params.id;
-    const { date } = req.query;
-    
-    let sql = `
-      SELECT s.*, t.name as terrain_name, t.sport_type, t.club_id
-      FROM slots s
-      JOIN terrains t ON s.terrain_id = t.id
-      WHERE s.terrain_id = ?
-    `;
-    const params = [terrainId];
-    
-    if (date) {
-      sql += ' AND DATE(s.date) = ?';
-      params.push(date);
-    }
-    
-    sql += ' ORDER BY s.date, s.start_time';
-    
-    const [slots] = await pool.query(sql, params);
-    res.json(slots || []);
-  } catch (error) {
-    console.error('Error listing slots:', error);
-    res.status(500).json({ error: 'Error fetching slots' });
-  }
-}
-
-// GET /clubs/:id/slots - List slots for all terrains of a club with terrain details
-async function listSlotsByClub(req, res){
-  try {
-    const clubId = req.params.id;
-    const { date } = req.query;
-    
-    let sql = `
-      SELECT s.*, t.name as terrain_name, t.sport_type, t.club_id
-      FROM slots s
-      JOIN terrains t ON s.terrain_id = t.id
-      WHERE t.club_id = ?
-    `;
-    const params = [clubId];
-    
-    if (date) {
-      sql += ' AND DATE(s.date) = ?';
-      params.push(date);
-    }
-    
-    sql += ' ORDER BY s.date, s.start_time, t.name';
-    
-    const [slots] = await pool.query(sql, params);
-    res.json(slots || []);
-  } catch (error) {
-    console.error('Error listing club slots:', error);
-    res.status(500).json({ error: 'Error fetching club slots' });
-  }
 }
 
 // Admin: remove duplicate slots within caller's club only.

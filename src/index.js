@@ -55,30 +55,19 @@ const db = mysql.createPool({
   queueLimit: 0,
 });
 
+const { runMigrations } = require('./services/migrationRunner');
+
 db.getConnection((err, conn) => {
   if (err) {
     logger.error('MySQL connection error: ' + err.message);
     process.exit(1);
   }
-  // Add lat/lng columns to announcements if missing (idempotent)
-  conn.query('ALTER TABLE announcements ADD COLUMN lat DECIMAL(10,8) NULL', () => {});
-  conn.query('ALTER TABLE announcements ADD COLUMN lng DECIMAL(11,8) NULL', () => {});
-  // Stripe idempotence key on reservations (idempotent)
-  conn.query('ALTER TABLE reservations ADD COLUMN stripe_session_id VARCHAR(120) NULL', () => {});
-  conn.query('ALTER TABLE reservations ADD UNIQUE INDEX uq_reservations_stripe_session (stripe_session_id)', () => {});
-  // Password reset tokens
-  conn.query(`CREATE TABLE IF NOT EXISTS password_resets (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    user_id INT NOT NULL,
-    token_hash CHAR(64) NOT NULL,
-    expires_at DATETIME NOT NULL,
-    used_at DATETIME NULL,
-    created_at DATETIME NOT NULL,
-    INDEX idx_password_resets_token (token_hash),
-    INDEX idx_password_resets_user (user_id)
-  )`, () => {});
   conn.release();
   logger.info('Connected to MySQL');
+  runMigrations(db).catch(e => {
+    logger.error('Migration error: ' + e.message);
+    process.exit(1);
+  });
 });
 
 // CRITICAL: Stripe webhook needs RAW body. Mount BEFORE express.json().
