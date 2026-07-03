@@ -1,6 +1,8 @@
 const AnnouncementsController = require('../controllers/announcements.controller');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
 const { asyncHandler, NotFoundError, ForbiddenError, ValidationError } = require('../middleware/errorHandler');
+const { queryOne } = require('../utils/dbHelpers');
+const { notify } = require('../utils/notify');
 const rateLimit = require('express-rate-limit');
 
 const writeLimiter = rateLimit({
@@ -101,6 +103,15 @@ module.exports = function (db) {
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
     try {
       const result = await controller.addParticipant(id, req.user.id, 'participant');
+      // Notify the organizer (unless they joined their own session).
+      const ann = await queryOne(db, 'SELECT created_by FROM announcements WHERE id = ?', [id]).catch(() => null);
+      if (ann && Number(ann.created_by) !== Number(req.user.id)) {
+        notify(db, ann.created_by, 'session_join', {
+          announcement_id: id,
+          from_user_id: req.user.id,
+          from_name: req.user.name || '',
+        });
+      }
       res.json({ success: true, participant: result });
     } catch (err) {
       throw classifyKnownError(err);
@@ -127,6 +138,15 @@ module.exports = function (db) {
     }
     try {
       const results = await controller.shareSession(id, req.user.id, userIds.map(Number).filter(Number.isFinite));
+      for (const r of results) {
+        if (r.success) {
+          notify(db, r.userId, 'invitation', {
+            announcement_id: id,
+            from_user_id: req.user.id,
+            from_name: req.user.name || '',
+          });
+        }
+      }
       res.status(201).json({ success: true, results, count: results.length });
     } catch (err) {
       throw classifyKnownError(err);

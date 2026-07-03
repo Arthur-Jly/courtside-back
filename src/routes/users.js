@@ -3,6 +3,7 @@ const { requireAuth } = require('../middleware/auth');
 const { asyncHandler, NotFoundError, ForbiddenError } = require('../middleware/errorHandler');
 const { queryPromise, queryOne, insert } = require('../utils/dbHelpers');
 const { validate, schemas } = require('../middleware/validation');
+const { notify } = require('../utils/notify');
 
 module.exports = (db) => {
   const router = express.Router();
@@ -202,6 +203,7 @@ module.exports = (db) => {
     `, [userId1, userId2, userId2, userId1]);
     if (existing) return res.status(400).json({ error: 'Relation already exists', status: existing.status });
     await insert(db, "INSERT INTO amis (user_id_1, user_id_2, status) VALUES (?, ?, 'pending')", [userId1, userId2]);
+    notify(db, userId2, 'friend_request', { from_user_id: userId1, from_name: req.user.name || '' });
     res.json({ success: true, status: 'pending' });
   }));
 
@@ -215,6 +217,10 @@ module.exports = (db) => {
       [status, id, req.user.id]
     );
     if (result.affectedRows === 0) throw new NotFoundError('Friend request not found');
+    if (status === 'accepted') {
+      const rel = await queryOne(db, 'SELECT user_id_1 FROM amis WHERE id = ?', [id]);
+      if (rel) notify(db, rel.user_id_1, 'friend_accept', { from_user_id: req.user.id, from_name: req.user.name || '' });
+    }
     res.json({ success: true, status });
   }));
 
