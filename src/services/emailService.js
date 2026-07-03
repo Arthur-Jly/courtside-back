@@ -93,4 +93,43 @@ async function sendWelcome(to, name) {
   return send(to, 'Bienvenue sur Courtside', html);
 }
 
-module.exports = { send, sendPasswordReset, sendWelcome, layout, button };
+async function sendReservationConfirmed(to, { courtName, date, slot, amount }) {
+  const html = layout('Réservation confirmée ✓', `
+    <p style="font-size:14px;line-height:1.6;color:#364541;">
+      Ton créneau est verrouillé. Récapitulatif :
+    </p>
+    <table style="width:100%;font-size:14px;color:#364541;border-collapse:collapse;">
+      <tr><td style="padding:6px 0;color:#6E7A77;">Terrain</td><td style="text-align:right;font-weight:600;">${courtName || '—'}</td></tr>
+      <tr><td style="padding:6px 0;color:#6E7A77;">Date</td><td style="text-align:right;font-weight:600;">${date || '—'}</td></tr>
+      <tr><td style="padding:6px 0;color:#6E7A77;">Horaire</td><td style="text-align:right;font-weight:600;">${slot || '—'}</td></tr>
+      ${amount != null ? `<tr><td style="padding:6px 0;color:#6E7A77;">Montant payé</td><td style="text-align:right;font-weight:600;">${Number(amount).toFixed(2)} €</td></tr>` : ''}
+    </table>
+    ${button(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/profil`, 'Voir mes réservations')}
+    <p style="font-size:13px;line-height:1.6;color:#6E7A77;">
+      Besoin d'annuler ? Rendez-vous dans vos réservations — les conditions
+      d'annulation du club s'appliquent.
+    </p>
+  `);
+  return send(to, `Réservation confirmée — ${courtName || 'Courtside'}`, html);
+}
+
+async function sendReservationReminder(to, { courtName, date, slot }) {
+  const html = layout("C'est demain ! 🎾", `
+    <p style="font-size:14px;line-height:1.6;color:#364541;">
+      Petit rappel : tu joues demain.
+    </p>
+    <table style="width:100%;font-size:14px;color:#364541;border-collapse:collapse;">
+      <tr><td style="padding:6px 0;color:#6E7A77;">Terrain</td><td style="text-align:right;font-weight:600;">${courtName || '—'}</td></tr>
+      <tr><td style="padding:6px 0;color:#6E7A77;">Date</td><td style="text-align:right;font-weight:600;">${date || '—'}</td></tr>
+      <tr><td style="padding:6px 0;color:#6E7A77;">Horaire</td><td style="text-align:right;font-weight:600;">${slot || '—'}</td></tr>
+    </table>
+    ${button(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/profil`, 'Voir ma réservation')}
+  `);
+  return send(to, `Rappel — ton match de demain (${slot || ''})`, html);
+}
+
+module.exports = {
+  send, sendPasswordReset, sendWelcome,
+  sendReservationConfirmed, sendReservationReminder,
+  layout, button,
+};

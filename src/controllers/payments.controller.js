@@ -1,4 +1,6 @@
 const { logger } = require('../utils/logger');
+const emailService = require('../services/emailService');
+const { notify } = require('../utils/notify');
 
 module.exports = function (db) {
   const pool = (db && typeof db.promise === 'function') ? db.promise() : db;
@@ -214,6 +216,23 @@ module.exports = function (db) {
         [userId, terrainId, startDateTime, endDateTime, splitPayment ? pricePerPerson : totalPrice, 'confirmed', session.id]
       );
       const reservationId = reservationResult.insertId;
+
+      // Confirmation email + in-app notification (both fire-and-forget).
+      const confirmationEmail = session.customer_email || session.customer_details?.email;
+      if (confirmationEmail) {
+        emailService.sendReservationConfirmed(confirmationEmail, {
+          courtName: court.name,
+          date,
+          slot: metadata.slot || `${normalizedStart.slice(0, 5)} - ${normalizedEnd.slice(0, 5)}`,
+          amount: session.amount_total != null ? session.amount_total / 100 : undefined,
+        }).catch(e => logger.error('sendReservationConfirmed failed: ' + e.message));
+      }
+      notify(db, userId, 'reservation_confirmed', {
+        reservation_id: reservationId,
+        court_name: court.name || '',
+        date,
+        slot: metadata.slot || '',
+      });
 
       const updateSlotById = async (slotId) => {
         if (!slotId) return 0;
