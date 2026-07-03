@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const { requireAuth } = require('../middleware/auth');
 const { asyncHandler, ForbiddenError } = require('../middleware/errorHandler');
 const { queryPromise, queryOne, insert } = require('../utils/dbHelpers');
+const sseHub = require('../services/sseHub');
 
 const { saveFile } = require('../services/storageService');
 
@@ -214,13 +215,30 @@ module.exports = (db) => {
       file_url = await saveFile(req.file.buffer, 'chats', uploadFilename(req.file.originalname), req.file.mimetype);
     }
 
-    if ((!content || content.trim() === '') && !file_url) {
+    // Structured messages (booking proposals) carry their data in metadata.
+    const messageType = req.body?.message_type === 'booking_request' ? 'booking_request' : 'text';
+    let metadata = null;
+    if (messageType === 'booking_request' && req.body?.booking_data && typeof req.body.booking_data === 'object') {
+      metadata = JSON.stringify(req.body.booking_data).slice(0, 2000);
+    }
+
+    if ((!content || content.trim() === '') && !file_url && !metadata) {
       return res.status(400).json({ error: 'Le message doit contenir du texte ou un fichier.' });
     }
     const messageId = await insert(db, `
-      INSERT INTO messages (chat_id, sender_id, content, created_at, file_url, file_type)
-      VALUES (?, ?, ?, NOW(), ?, ?)
-    `, [chatId, senderId, content || null, file_url, file_type]);
+      INSERT INTO messages (chat_id, sender_id, content, created_at, file_url, file_type, message_type, metadata)
+      VALUES (?, ?, ?, NOW(), ?, ?, ?, ?)
+    `, [chatId, senderId, content || null, file_url, file_type, messageType, metadata]);
+
+    // Real-time: wake up the other participants.
+    try {
+      const others = await queryPromise(db,
+        'SELECT user_id FROM chat_participants WHERE chat_id = ? AND user_id != ?',
+        [chatId, senderId]
+      );
+      for (const p of others) sseHub.push(p.user_id, 'message', { chat_id: chatId });
+    } catch { /* realtime is best-effort */ }
+
     res.json({ success: true, message_id: messageId, file_url });
   }));
 

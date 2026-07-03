@@ -114,6 +114,7 @@ const reviewsRouter = require('./routes/reviews')(db);
 const financesRouter = require('./routes/finances')(db);
 const announcementsRouter = require('./routes/announcements')(db);
 const notificationsRouter = require('./routes/notifications')(db);
+const realtimeRouter = require('./routes/realtime')();
 const paymentsRouter = paymentsModule(db);
 
 const CronService = require('./services/cronService');
@@ -133,6 +134,7 @@ app.use('/api', reviewsRouter);
 app.use('/api', financesRouter);
 app.use('/api', announcementsRouter);
 app.use('/api', notificationsRouter);
+app.use('/api', realtimeRouter);
 app.use('/api', paymentsRouter);
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Route not found' }));

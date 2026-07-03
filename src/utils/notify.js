@@ -1,4 +1,5 @@
 const { logger } = require('./logger');
+const sseHub = require('../services/sseHub');
 
 /**
  * Fire-and-forget in-app notification.
@@ -15,6 +16,7 @@ function notify(db, userId, type, payload = {}) {
     [uid, String(type).slice(0, 40), JSON.stringify(payload).slice(0, 2000)],
     (err) => {
       if (err) logger.error(`notify(${type}) failed for user ${uid}: ${err.message}`);
+      else sseHub.push(uid, 'notification', { type, payload });
     }
   );
 }
