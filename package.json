@@ -11,6 +11,7 @@
     "migrate": "node scripts/migrate.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1079.0",
     "axios": "^1.12.2",
     "bcrypt": "^6.0.0",
     "chalk": "^4.1.2",

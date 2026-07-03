@@ -2,13 +2,11 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const crypto = require('crypto');
-const fs = require('fs');
 const { requireAuth } = require('../middleware/auth');
 const { asyncHandler, ForbiddenError } = require('../middleware/errorHandler');
 const { queryPromise, queryOne, insert } = require('../utils/dbHelpers');
 
-const UPLOAD_DIR = path.join(__dirname, '../../uploads/chats');
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+const { saveFile } = require('../services/storageService');
 
 const ALLOWED_MIME = new Set([
   'image/jpeg', 'image/png', 'image/gif', 'image/webp',
@@ -16,15 +14,10 @@ const ALLOWED_MIME = new Set([
 ]);
 const ALLOWED_EXT = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.pdf']);
 
+// Files are buffered in memory then persisted via the storage service
+// (S3 in production, local disk in dev).
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
-    filename: (_req, file, cb) => {
-      const ext = path.extname(file.originalname).toLowerCase();
-      const safeExt = ALLOWED_EXT.has(ext) ? ext : '';
-      cb(null, `${Date.now()}-${crypto.randomBytes(12).toString('hex')}${safeExt}`);
-    },
-  }),
+  storage: multer.memoryStorage(),
   limits: {
     fileSize: 5 * 1024 * 1024, // 5 MB
     files: 1,
@@ -37,6 +30,12 @@ const upload = multer({
     cb(null, true);
   },
 });
+
+function uploadFilename(originalname) {
+  const ext = path.extname(originalname).toLowerCase();
+  const safeExt = ALLOWED_EXT.has(ext) ? ext : '';
+  return `${Date.now()}-${crypto.randomBytes(12).toString('hex')}${safeExt}`;
+}
 
 async function assertChatMember(db, chatId, userId) {
   const row = await queryOne(
@@ -202,21 +201,18 @@ module.exports = (db) => {
   router.post('/chats/:chat_id/messages', requireAuth, upload.single('file'), asyncHandler(async (req, res) => {
     const chatId = Number(req.params.chat_id);
     if (!Number.isFinite(chatId)) {
-      if (req.file) try { fs.unlinkSync(req.file.path); } catch {}
       return res.status(400).json({ error: 'chat_id invalide' });
     }
-    try {
-      await assertChatMember(db, chatId, req.user.id);
-    } catch (e) {
-      if (req.file) try { fs.unlinkSync(req.file.path); } catch {}
-      throw e;
-    }
+    await assertChatMember(db, chatId, req.user.id);
 
     const senderId = req.user.id;
     const rawContent = typeof req.body?.content === 'string' ? req.body.content : '';
     const content = rawContent.slice(0, 4000);
     const file_type = typeof req.body?.file_type === 'string' ? req.body.file_type.slice(0, 50) : null;
-    const file_url = req.file ? `/uploads/chats/${req.file.filename}` : null;
+    let file_url = null;
+    if (req.file) {
+      file_url = await saveFile(req.file.buffer, 'chats', uploadFilename(req.file.originalname), req.file.mimetype);
+    }
 
     if ((!content || content.trim() === '') && !file_url) {
       return res.status(400).json({ error: 'Le message doit contenir du texte ou un fichier.' });
