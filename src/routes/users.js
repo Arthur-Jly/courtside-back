@@ -13,6 +13,31 @@ module.exports = (db) => {
     return Number.isFinite(v) ? v : null;
   };
 
+  // RGPD data portability: everything we hold about the requesting user.
+  router.get('/users/me/export', requireAuth, asyncHandler(async (req, res) => {
+    const userId = req.user.id;
+    const grab = async (sql, params) => {
+      try { return await queryPromise(db, sql, params); } catch { return []; }
+    };
+
+    const [user] = await grab('SELECT id, name, email, username, role, created_at FROM users WHERE id = ?', [userId]);
+    const profile = await grab('SELECT bio, city, birthdate, sports, is_public FROM user_profiles WHERE user_id = ?', [userId]);
+    const reservations = await grab('SELECT id, terrain_id, start_time, end_time, price, status, created_at FROM reservations WHERE user_id = ?', [userId]);
+    const favorites = await grab('SELECT terrain_id, created_at FROM favorites WHERE user_id = ?', [userId]);
+    const friends = await grab('SELECT user_id_1, user_id_2, status FROM amis WHERE user_id_1 = ? OR user_id_2 = ?', [userId, userId]);
+    const announcements = await grab('SELECT id, sport_type, level, places_total, status, created_at FROM announcements WHERE created_by = ?', [userId]);
+    const messages = await grab('SELECT m.chat_id, m.content, m.message_type, m.created_at FROM messages m WHERE m.sender_id = ? ORDER BY m.created_at LIMIT 5000', [userId]);
+    const notifications = await grab('SELECT type, payload, read_at, created_at FROM notifications WHERE user_id = ?', [userId]);
+
+    res.setHeader('Content-Disposition', 'attachment; filename="courtside-export.json"');
+    res.json({
+      exported_at: new Date().toISOString(),
+      user: user || null,
+      profile: profile[0] || null,
+      reservations, favorites, friends, announcements, messages, notifications,
+    });
+  }));
+
   // RGPD account deletion: purge personal data, anonymize what must stay
   // for other users' history (messages, past sessions).
   router.delete('/users/me', requireAuth, asyncHandler(async (req, res) => {
