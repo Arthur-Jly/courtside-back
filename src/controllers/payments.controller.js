@@ -228,9 +228,11 @@ module.exports = function (db) {
       const startDateTime = `${date} ${normalizedStart}`;
       const endDateTime = `${date} ${normalizedEnd}`;
 
+      // Split into 4 players by default (matches the frontend price per person).
+      const splitTotal = splitPayment ? 4 : null;
       const [reservationResult] = await pool.query(
-        'INSERT INTO reservations (user_id, terrain_id, start_time, end_time, price, status, stripe_session_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())',
-        [userId, terrainId, startDateTime, endDateTime, splitPayment ? pricePerPerson : totalPrice, 'confirmed', session.id]
+        'INSERT INTO reservations (user_id, terrain_id, start_time, end_time, price, status, stripe_session_id, split_total, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())',
+        [userId, terrainId, startDateTime, endDateTime, splitPayment ? pricePerPerson : totalPrice, 'confirmed', session.id, splitTotal]
       );
       const reservationId = reservationResult.insertId;
 
