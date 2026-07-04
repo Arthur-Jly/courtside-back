@@ -17,6 +17,7 @@ module.exports = function paymentsRouter(db) {
   router.post('/payments/create-checkout-session', requireAuth, paymentsLimiter, asyncHandler(controller.createCheckoutSession));
   router.post('/payments/confirm-payment', optionalAuth, paymentsLimiter, asyncHandler(controller.confirmPayment));
   router.get('/payments/session/:sessionId', requireAuth, paymentsLimiter, asyncHandler(controller.getSessionDetails));
+  router.post('/payments/create-share-link', requireAuth, paymentsLimiter, asyncHandler(controller.createShareLink));
 
   return router;
 };
