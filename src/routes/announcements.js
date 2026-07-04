@@ -104,6 +104,8 @@ module.exports = function (db) {
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
     try {
       const result = await controller.addParticipant(id, req.user.id, 'participant');
+      // Joining clears any waitlist entry of this user.
+      queryPromise(db, 'DELETE FROM annonce_waitlist WHERE annonce_id = ? AND user_id = ?', [id, req.user.id]).catch(() => {});
       // Notify the organizer (unless they joined their own session).
       const ann = await queryOne(db, 'SELECT created_by FROM announcements WHERE id = ?', [id]).catch(() => null);
       if (ann && Number(ann.created_by) !== Number(req.user.id)) {
@@ -124,10 +126,68 @@ module.exports = function (db) {
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
     try {
       const result = await controller.removeParticipant(id, req.user.id);
+      // A spot just freed up: ping the first waitlisted user not yet notified.
+      try {
+        const next = await queryOne(db,
+          'SELECT user_id FROM annonce_waitlist WHERE annonce_id = ? AND notified_at IS NULL ORDER BY created_at ASC LIMIT 1',
+          [id]
+        );
+        if (next) {
+          await queryPromise(db,
+            'UPDATE annonce_waitlist SET notified_at = NOW() WHERE annonce_id = ? AND user_id = ?',
+            [id, next.user_id]
+          );
+          notify(db, next.user_id, 'waitlist_spot', { announcement_id: id });
+        }
+      } catch { /* waitlist promotion is best-effort */ }
       res.json(result);
     } catch (err) {
       throw classifyKnownError(err);
     }
+  }));
+
+  // ── Waitlist (full sessions) ───────────────────────────────────────────────
+
+  router.post('/announcements/:id/waitlist', requireAuth, writeLimiter, asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
+    const ann = await queryOne(db,
+      'SELECT id, created_by, places_disponibles, status FROM announcements WHERE id = ?', [id]);
+    if (!ann) return res.status(404).json({ error: 'Annonce introuvable' });
+    if (['cancelled', 'expired'].includes(String(ann.status))) {
+      return res.status(400).json({ error: 'Cette session est terminée' });
+    }
+    if (Number(ann.created_by) === Number(req.user.id)) {
+      return res.status(400).json({ error: 'Tu organises cette session' });
+    }
+    if (Number(ann.places_disponibles) > 0) {
+      return res.status(400).json({ error: 'Des places sont disponibles — rejoins directement la session' });
+    }
+    await queryPromise(db,
+      'INSERT IGNORE INTO annonce_waitlist (annonce_id, user_id, created_at) VALUES (?, ?, NOW())',
+      [id, req.user.id]
+    );
+    res.status(201).json({ success: true, waitlisted: true });
+  }));
+
+  router.delete('/announcements/:id/waitlist', requireAuth, asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
+    await queryPromise(db,
+      'DELETE FROM annonce_waitlist WHERE annonce_id = ? AND user_id = ?',
+      [id, req.user.id]
+    );
+    res.json({ success: true, waitlisted: false });
+  }));
+
+  router.get('/announcements/:id/waitlist/me', requireAuth, asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
+    const row = await queryOne(db,
+      'SELECT id FROM annonce_waitlist WHERE annonce_id = ? AND user_id = ? LIMIT 1',
+      [id, req.user.id]
+    );
+    res.json({ waitlisted: !!row });
   }));
 
   router.post('/announcements/:id/invite', requireAuth, writeLimiter, asyncHandler(async (req, res) => {
