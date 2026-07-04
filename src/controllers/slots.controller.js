@@ -523,12 +523,37 @@ async function adminTruncateSlots(req, res){
   res.json({ ok:true, deleted: result?.affectedRows ?? 0 });
 }
 
+// GET /clubs/:id/occupancy — fill rate per day over the next 7 days.
+async function clubOccupancy(req, res){
+  const clubId = Number(req.params.id);
+  if (!Number.isFinite(clubId)) return res.status(400).json({ error: 'club_id invalide' });
+  const [rows] = await pool.query(`
+    SELECT DATE_FORMAT(s.date, '%Y-%m-%d') AS day,
+           COUNT(*) AS total,
+           SUM(s.status = 'booked') AS booked
+    FROM slots s
+    JOIN terrains t ON t.id = s.terrain_id
+    WHERE t.club_id = ?
+      AND s.date >= CURDATE()
+      AND s.date < DATE_ADD(CURDATE(), INTERVAL 7 DAY)
+    GROUP BY DATE(s.date)
+    ORDER BY day
+  `, [clubId]);
+  res.json(rows.map(r => ({
+    day: r.day,
+    total: Number(r.total),
+    booked: Number(r.booked || 0),
+    rate: Number(r.total) > 0 ? Math.round((Number(r.booked || 0) / Number(r.total)) * 100) : 0,
+  })));
+}
+
   return {
     adminGenerateSlots,
     adminGenerateSlotsForTerrain,
     adminGenerateSlotsForClub,
     adminRemoveDuplicateSlots,
     adminTruncateSlots,
+    clubOccupancy,
     listSlots,
     listSlotsByClub,
     bookSlot,
