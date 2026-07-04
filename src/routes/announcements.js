@@ -1,8 +1,9 @@
 const AnnouncementsController = require('../controllers/announcements.controller');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
 const { asyncHandler, NotFoundError, ForbiddenError, ValidationError } = require('../middleware/errorHandler');
-const { queryOne } = require('../utils/dbHelpers');
+const { queryOne, queryPromise, insert } = require('../utils/dbHelpers');
 const { notify } = require('../utils/notify');
+const sseHub = require('../services/sseHub');
 const rateLimit = require('express-rate-limit');
 
 const writeLimiter = rateLimit({
@@ -151,6 +152,54 @@ module.exports = function (db) {
     } catch (err) {
       throw classifyKnownError(err);
     }
+  }));
+
+  // Match conversation: one group chat per announcement, organizer or
+  // participant can open it; creation is idempotent (chats.announcement_id).
+  router.post('/announcements/:id/chat', requireAuth, writeLimiter, asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
+
+    const ann = await queryOne(db,
+      'SELECT id, created_by, sport_type, manual_date FROM announcements WHERE id = ?', [id]);
+    if (!ann) return res.status(404).json({ error: 'Annonce introuvable' });
+
+    const participants = await queryPromise(db,
+      'SELECT user_id FROM annonce_participants WHERE annonce_id = ?', [id]);
+    const memberSet = new Set(participants.map(p => Number(p.user_id)));
+    memberSet.add(Number(ann.created_by));
+    if (!memberSet.has(Number(req.user.id))) {
+      return res.status(403).json({ error: 'Réservé aux participants de la session' });
+    }
+
+    const existing = await queryOne(db, 'SELECT * FROM chats WHERE announcement_id = ?', [id]);
+    if (existing) {
+      // Late joiners are added on open.
+      await queryPromise(db, `
+        INSERT IGNORE INTO chat_participants (chat_id, user_id, role, joined_at, last_read_at)
+        VALUES (?, ?, 'member', NOW(), NOW())
+      `, [existing.id, req.user.id]);
+      return res.json({ ...existing, display_name: existing.name });
+    }
+
+    const sport = String(ann.sport_type || 'match');
+    const name = `Match ${sport.charAt(0).toUpperCase()}${sport.slice(1)}${ann.manual_date ? ` · ${String(ann.manual_date).slice(0, 10)}` : ''}`.slice(0, 100);
+    const chatId = await insert(db,
+      "INSERT INTO chats (type, name, status, announcement_id, created_at) VALUES ('group', ?, 'accepted', ?, NOW())",
+      [name, id]
+    );
+    const members = [...memberSet];
+    const values = members.map(uid => [chatId, uid, Number(uid) === Number(ann.created_by) ? 'admin' : 'member']);
+    const placeholders = values.map(() => '(?, ?, ?, NOW(), NOW())').join(', ');
+    await queryPromise(db,
+      `INSERT INTO chat_participants (chat_id, user_id, role, joined_at, last_read_at) VALUES ${placeholders}`,
+      values.flat()
+    );
+    for (const uid of members) {
+      if (Number(uid) !== Number(req.user.id)) sseHub.push(uid, 'message', { chat_id: chatId });
+    }
+    const chat = await queryOne(db, 'SELECT * FROM chats WHERE id = ?', [chatId]);
+    res.status(201).json({ ...chat, display_name: name });
   }));
 
   router.get('/users/:userId/invitations', requireAuth, asyncHandler(async (req, res) => {

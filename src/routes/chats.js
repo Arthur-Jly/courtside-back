@@ -188,6 +188,36 @@ module.exports = (db) => {
     res.json(chat);
   }));
 
+  // Group chat creation (friends picker in the frontend).
+  router.post('/chats/group', requireAuth, asyncHandler(async (req, res) => {
+    const creatorId = req.user.id;
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, 100) : '';
+    const memberIds = Array.isArray(req.body?.member_ids)
+      ? [...new Set(req.body.member_ids.map(Number).filter(id => Number.isFinite(id) && id > 0 && id !== creatorId))]
+      : [];
+    if (!name) return res.status(400).json({ error: 'Nom du groupe requis' });
+    if (memberIds.length < 1 || memberIds.length > 30) {
+      return res.status(400).json({ error: 'Entre 1 et 30 membres requis' });
+    }
+
+    const chatId = await insert(db,
+      "INSERT INTO chats (type, name, status, created_at) VALUES ('group', ?, 'accepted', NOW())",
+      [name]
+    );
+    const values = [[chatId, creatorId, 'admin'], ...memberIds.map(id => [chatId, id, 'member'])];
+    const placeholders = values.map(() => '(?, ?, ?, NOW(), NOW())').join(', ');
+    await queryPromise(db,
+      `INSERT INTO chat_participants (chat_id, user_id, role, joined_at, last_read_at) VALUES ${placeholders}`,
+      values.flat()
+    );
+
+    for (const id of memberIds) {
+      sseHub.push(id, 'message', { chat_id: chatId });
+    }
+    const chat = await queryOne(db, 'SELECT * FROM chats WHERE id = ?', [chatId]);
+    res.status(201).json({ ...chat, display_name: name });
+  }));
+
   router.put('/chats/:chat_id/accept', requireAuth, asyncHandler(async (req, res) => {
     const chatId = Number(req.params.chat_id);
     if (!Number.isFinite(chatId)) return res.status(400).json({ error: 'chat_id invalide' });
