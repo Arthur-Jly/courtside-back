@@ -180,6 +180,71 @@ module.exports = function (db) {
     res.json({ success: true, waitlisted: false });
   }));
 
+  // ── Post-match fair-play ratings ───────────────────────────────────────────
+
+  router.post('/announcements/:id/rate-players', requireAuth, writeLimiter, asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
+    const ratings = Array.isArray(req.body?.ratings) ? req.body.ratings : [];
+    if (ratings.length === 0 || ratings.length > 30) {
+      return res.status(400).json({ error: 'ratings requis (max 30)' });
+    }
+
+    const ann = await queryOne(db,
+      'SELECT id, created_by, manual_date, slot_start FROM announcements WHERE id = ?', [id]);
+    if (!ann) return res.status(404).json({ error: 'Annonce introuvable' });
+
+    // Only past sessions can be rated.
+    const sessionDate = ann.manual_date || ann.slot_start;
+    if (sessionDate && new Date(sessionDate) > new Date()) {
+      return res.status(400).json({ error: 'La session n\'a pas encore eu lieu' });
+    }
+
+    const participants = await queryPromise(db,
+      'SELECT user_id FROM annonce_participants WHERE annonce_id = ?', [id]);
+    const memberSet = new Set(participants.map(p => Number(p.user_id)));
+    memberSet.add(Number(ann.created_by));
+    if (!memberSet.has(Number(req.user.id))) {
+      return res.status(403).json({ error: 'Réservé aux participants de la session' });
+    }
+
+    let saved = 0;
+    for (const r of ratings) {
+      const ratedId = Number(r?.user_id);
+      const rating = Number(r?.rating);
+      if (!Number.isFinite(ratedId) || ratedId === Number(req.user.id)) continue;
+      if (!memberSet.has(ratedId)) continue;
+      if (!Number.isInteger(rating) || rating < 1 || rating > 5) continue;
+      await queryPromise(db, `
+        INSERT INTO player_ratings (annonce_id, rater_id, rated_user_id, rating, created_at)
+        VALUES (?, ?, ?, ?, NOW())
+        ON DUPLICATE KEY UPDATE rating = VALUES(rating), created_at = NOW()
+      `, [id, req.user.id, ratedId, rating]);
+      saved++;
+    }
+    res.status(201).json({ success: true, saved });
+  }));
+
+  router.get('/announcements/:id/my-ratings', requireAuth, asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
+    const rows = await queryPromise(db,
+      'SELECT rated_user_id, rating FROM player_ratings WHERE annonce_id = ? AND rater_id = ?',
+      [id, req.user.id]
+    );
+    res.json(rows);
+  }));
+
+  router.get('/users/:userId/fairplay', asyncHandler(async (req, res) => {
+    const userId = Number(req.params.userId);
+    if (!Number.isFinite(userId)) return res.status(400).json({ error: 'userId invalide' });
+    const row = await queryOne(db,
+      'SELECT ROUND(AVG(rating), 1) AS avg_rating, COUNT(*) AS count FROM player_ratings WHERE rated_user_id = ?',
+      [userId]
+    );
+    res.json({ avg: row?.avg_rating != null ? Number(row.avg_rating) : null, count: Number(row?.count || 0) });
+  }));
+
   router.get('/announcements/:id/waitlist/me', requireAuth, asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
