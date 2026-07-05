@@ -1,5 +1,7 @@
 # courtside-back (Claude Code)
 
+- **Full endpoint reference: `courtside-front/docs/API.md`** — every /api route, auth level, notes.
+  Update it whenever a route is added/changed. Per-domain detail: `src/routes/doc/API_*.md`.
 - Stack: Node.js, Express, MySQL (mysql2), JWT, Stripe, nodemailer, node-cron, joi. CommonJS only.
 - Entry: src/index.js. API base: /api. Auth: /api/auth. Stripe webhook mounted BEFORE express.json().
 - Structure: src/routes, src/controllers, src/services, src/middleware, src/utils, src/migrations.
