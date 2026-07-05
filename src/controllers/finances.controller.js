@@ -183,7 +183,63 @@ module.exports = function(db) {
     }
   }
 
+  // GET /clubs/:id/finances/export?from=YYYY-MM-DD&to=YYYY-MM-DD → CSV
+  async function exportClubFinances(req, res) {
+    try {
+      const clubId = Number(req.params.id);
+      if (!Number.isFinite(clubId)) return res.status(400).json({ error: 'id invalide' });
+
+      const isDate = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
+      const to = isDate(req.query.to) ? req.query.to : new Date().toISOString().slice(0, 10);
+      const from = isDate(req.query.from)
+        ? req.query.from
+        : new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+      const [rows] = await pool.query(`
+        SELECT s.date AS date, s.start_time, s.end_time, t.name AS terrain,
+               u.name AS client, r.price, r.status
+        FROM reservations r
+        JOIN slots s ON r.id = s.reservation_id
+        JOIN terrains t ON s.terrain_id = t.id
+        JOIN users u ON r.user_id = u.id
+        WHERE t.club_id = ? AND s.date >= ? AND s.date <= ? AND r.status = 'confirmed'
+        ORDER BY s.date, s.start_time
+      `, [clubId, from, to]);
+
+      const commissionRate = 0.10;
+      const esc = (v) => {
+        const s = String(v ?? '');
+        return /[",;\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      };
+      const header = ['Date', 'Debut', 'Fin', 'Terrain', 'Client', 'Montant', 'Commission', 'Net'];
+      const lines = [header.join(';')];
+      for (const r of rows) {
+        const price = parseFloat(r.price) || 0;
+        const commission = Math.round(price * commissionRate * 100) / 100;
+        lines.push([
+          String(r.date).slice(0, 10),
+          String(r.start_time).slice(0, 5),
+          String(r.end_time).slice(0, 5),
+          esc(r.terrain),
+          esc(r.client),
+          price.toFixed(2),
+          commission.toFixed(2),
+          (price - commission).toFixed(2),
+        ].join(';'));
+      }
+      // BOM so Excel opens UTF-8 correctly.
+      const csv = '﻿' + lines.join('\r\n');
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="courtside-compta-${from}_${to}.csv"`);
+      res.send(csv);
+    } catch (error) {
+      logger.error('Error exporting club finances: ' + error.message);
+      res.status(500).json({ error: 'Erreur lors de l\'export' });
+    }
+  }
+
   return {
     getClubFinances,
+    exportClubFinances,
   };
 };

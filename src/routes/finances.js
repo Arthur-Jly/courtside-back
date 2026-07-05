@@ -8,6 +8,7 @@ module.exports = function (db) {
 
   // Only the club admin of THIS club may see its finances.
   router.get('/clubs/:id/finances', requireAuth, requireOwnClub('id'), asyncHandler(controller.getClubFinances));
+  router.get('/clubs/:id/finances/export', requireAuth, requireOwnClub('id'), asyncHandler(controller.exportClubFinances));
 
   return router;
 };
