@@ -14,6 +14,9 @@
 - `migrationRunner.js` — applies src/migrations/NNN_*.sql at boot and via `npm run migrate`,
   tracked in schema_migrations, tolerates already-exists errors (1050/1060/1061).
   ALL schema changes go through numbered migrations — never inline ALTER at boot.
+  Current: 001 baseline (lat/lng, stripe_session_id), 002 notifications, 003 reservation
+  reminder, 004 group chats (chats.announcement_id), 005 waitlist, 006 player_ratings,
+  007 reservation_share_payments, 008 reservations.split_total.
 - `emailService.js` — SMTP-agnostic (nodemailer), branded templates: password reset, welcome,
   reservation confirmed, J-1 reminder. Fire-and-forget from callers (.catch + log).
 - `sseHub.js` — in-memory per-user SSE registry. `push(userId, event, data)`. Single-instance;
