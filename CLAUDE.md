@@ -16,7 +16,8 @@
   ALL schema changes go through numbered migrations — never inline ALTER at boot.
   Current: 001 baseline (lat/lng, stripe_session_id), 002 notifications, 003 reservation
   reminder, 004 group chats (chats.announcement_id), 005 waitlist, 006 player_ratings,
-  007 reservation_share_payments, 008 reservations.split_total.
+  007 reservation_share_payments, 008 reservations.split_total, 009 slots.status VARCHAR
+  (for 'blocked'), 010 newsletter_subscribers.
 - `emailService.js` — SMTP-agnostic (nodemailer), branded templates: password reset, welcome,
   reservation confirmed, J-1 reminder. Fire-and-forget from callers (.catch + log).
 - `sseHub.js` — in-memory per-user SSE registry. `push(userId, event, data)`. Single-instance;
