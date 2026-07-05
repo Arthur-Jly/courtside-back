@@ -523,6 +523,59 @@ async function adminTruncateSlots(req, res){
   res.json({ ok:true, deleted: result?.affectedRows ?? 0 });
 }
 
+// POST /admin/slots/block — club admin blocks a slot (maintenance, private use).
+// Marks an existing free slot 'blocked', or inserts a blocked slot if none exists.
+async function adminBlockSlot(req, res){
+  const adminClubId = req.user && req.user.club_id;
+  if (!adminClubId) return res.status(403).json({ error: 'club admin scope required' });
+  const terrainId = Number(req.body.terrain_id);
+  const date = req.body.date;
+  const startTime = req.body.start_time;
+  const endTime = req.body.end_time;
+  if (!Number.isFinite(terrainId) || !/^\d{4}-\d{2}-\d{2}$/.test(String(date)) || !/^\d{2}:\d{2}/.test(String(startTime))) {
+    return res.status(400).json({ error: 'terrain_id, date, start_time requis' });
+  }
+
+  // Terrain must belong to the caller's club.
+  const [trows] = await pool.query('SELECT club_id FROM terrains WHERE id = ?', [terrainId]);
+  if (!trows.length || Number(trows[0].club_id) !== Number(adminClubId)) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+
+  const start = String(startTime).slice(0, 5) + ':00';
+  const end = endTime ? String(endTime).slice(0, 5) + ':00' : null;
+
+  const [existing] = await pool.query(
+    'SELECT id, status FROM slots WHERE terrain_id = ? AND date = ? AND start_time = ? LIMIT 1',
+    [terrainId, date, start]
+  );
+  if (existing.length) {
+    if (existing[0].status === 'booked') return res.status(409).json({ error: 'Ce créneau est déjà réservé' });
+    await pool.query("UPDATE slots SET status = 'blocked' WHERE id = ?", [existing[0].id]);
+    return res.json({ ok: true, slot_id: existing[0].id, blocked: true });
+  }
+  const [ins] = await pool.query(
+    "INSERT INTO slots (terrain_id, club_id, date, start_time, end_time, status) VALUES (?, ?, ?, ?, ?, 'blocked')",
+    [terrainId, adminClubId, date, start, end || start]
+  );
+  res.status(201).json({ ok: true, slot_id: ins.insertId, blocked: true });
+}
+
+// DELETE /admin/slots/:id/block — free a blocked slot again.
+async function adminUnblockSlot(req, res){
+  const adminClubId = req.user && req.user.club_id;
+  if (!adminClubId) return res.status(403).json({ error: 'club admin scope required' });
+  const slotId = Number(req.params.id);
+  if (!Number.isFinite(slotId)) return res.status(400).json({ error: 'id invalide' });
+  const [rows] = await pool.query('SELECT club_id, status FROM slots WHERE id = ?', [slotId]);
+  if (!rows.length || Number(rows[0].club_id) !== Number(adminClubId)) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+  if (rows[0].status !== 'blocked') return res.status(400).json({ error: 'Ce créneau n\'est pas bloqué' });
+  await pool.query("UPDATE slots SET status = 'free' WHERE id = ?", [slotId]);
+  res.json({ ok: true, freed: true });
+}
+
 // GET /clubs/:id/occupancy — fill rate per day over the next 7 days.
 async function clubOccupancy(req, res){
   const clubId = Number(req.params.id);
@@ -553,6 +606,8 @@ async function clubOccupancy(req, res){
     adminGenerateSlotsForClub,
     adminRemoveDuplicateSlots,
     adminTruncateSlots,
+    adminBlockSlot,
+    adminUnblockSlot,
     clubOccupancy,
     listSlots,
     listSlotsByClub,
