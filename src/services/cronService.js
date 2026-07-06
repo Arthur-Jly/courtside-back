@@ -71,6 +71,16 @@ class CronService {
       job: reminderJob
     });
 
+    // Job 4: Nettoyage quotidien de la base, tous les jours à 04:00
+    const cleanupJob = cron.schedule('0 4 * * *', () => this.cleanupDatabase());
+
+    this.jobs.push({
+      name: 'db-cleanup',
+      schedule: '0 4 * * *',
+      description: 'Purge les créneaux libres passés et les tokens de reset expirés',
+      job: cleanupJob
+    });
+
     console.log(`✅ ${this.jobs.length} tâches automatiques démarrées:`);
     this.jobs.forEach(({ name, schedule, description }) => {
       console.log(`   - ${name} (${schedule}): ${description}`);
@@ -124,6 +134,28 @@ class CronService {
   }
 
   /**
+   * Nettoyage quotidien : créneaux libres passés (la table slots croît sans
+   * limite sinon — les créneaux réservés sont conservés pour l'historique)
+   * et tokens de réinitialisation expirés depuis plus de 7 jours.
+   */
+  cleanupDatabase() {
+    const run = (sql, label) => new Promise((resolve) => {
+      this.db.query(sql, [], (err, result) => {
+        if (err) {
+          console.error(`❌ [CRON] Nettoyage ${label} échoué:`, err.message);
+          return resolve(0);
+        }
+        if (result.affectedRows > 0) console.log(`✅ [CRON] Nettoyage: ${result.affectedRows} ${label} supprimé(s)`);
+        resolve(result.affectedRows);
+      });
+    });
+    return Promise.all([
+      run("DELETE FROM slots WHERE status = 'free' AND date < CURDATE()", 'créneau(x) libre(s) passé(s)'),
+      run('DELETE FROM password_resets WHERE expires_at < DATE_SUB(NOW(), INTERVAL 7 DAY)', 'token(s) de reset expiré(s)'),
+    ]).then(([slots, tokens]) => ({ slots, tokens }));
+  }
+
+  /**
    * Arrête tous les cron jobs
    */
   stop() {
@@ -154,6 +186,9 @@ class CronService {
     }
     if (jobName === 'reservation-reminders') {
       return await this.sendReservationReminders();
+    }
+    if (jobName === 'db-cleanup') {
+      return await this.cleanupDatabase();
     }
     throw new Error(`Job inconnu: ${jobName}`);
   }
