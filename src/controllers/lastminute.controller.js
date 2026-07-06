@@ -2,6 +2,12 @@
  * Contrôleur pour la gestion des créneaux last minute
  */
 
+// Colonnes exposées à l'API : current_players/max_players sont aliasés en
+// camelCase car le front (FlashPage) consomme les lignes telles quelles.
+const SLOT_COLUMNS = `id, title, location, address, sport, time,
+  current_players AS currentPlayers, max_players AS maxPlayers,
+  level, distance, description, organizer, image, created_at`;
+
 class LastMinuteController {
   constructor(db) {
     this.db = db;
@@ -16,7 +22,7 @@ class LastMinuteController {
    */
   async getLastMinuteSlots(filters = {}) {
     const { sport, location } = filters;
-    let sql = 'SELECT * FROM last_minute_slots';
+    let sql = `SELECT ${SLOT_COLUMNS} FROM last_minute_slots`;
     const params = [];
     const conditions = [];
 
@@ -60,7 +66,7 @@ class LastMinuteController {
   async getSlotById(id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        'SELECT * FROM last_minute_slots WHERE id = ?',
+        `SELECT ${SLOT_COLUMNS} FROM last_minute_slots WHERE id = ?`,
         [id],
         (err, slots) => {
           if (err) {

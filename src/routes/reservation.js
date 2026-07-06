@@ -15,8 +15,9 @@ module.exports = function (db) {
         r.id AS id, r.status AS status, r.created_at AS created_at, r.price,
         DATE(r.start_time) AS date, TIME(r.start_time) AS start_time, TIME(r.end_time) AS end_time,
         r.terrain_id, t.name AS terrain_name, t.sport_type, t.club_id,
-        c.name AS club_name, c.address, c.city,
-        (SELECT COUNT(*) FROM reservation_participants rp WHERE rp.reservation_id = r.id) AS participants_count
+        c.name AS club_name, c.address, c.city, r.split_total,
+        (SELECT COUNT(*) FROM reservation_participants rp WHERE rp.reservation_id = r.id) AS participants_count,
+        (SELECT COUNT(*) FROM reservation_share_payments sp WHERE sp.reservation_id = r.id) AS shares_paid
       FROM reservations r
       JOIN terrains t ON r.terrain_id = t.id
       LEFT JOIN clubs c ON t.club_id = c.id AND c.status = 'confirme'
@@ -71,6 +72,33 @@ module.exports = function (db) {
     );
     reservation.participants = participants || [];
     res.json(reservation);
+  }));
+
+  // Split-fare share status — organizer only.
+  router.get('/reservations/:id/shares', requireAuth, asyncHandler(async (req, res) => {
+    const reservationId = Number(req.params.id);
+    if (!Number.isFinite(reservationId)) return res.status(400).json({ error: 'id invalide' });
+
+    const reservation = await queryOne(db,
+      'SELECT id, user_id, price, split_total FROM reservations WHERE id = ? LIMIT 1',
+      [reservationId]
+    );
+    if (!reservation) throw new NotFoundError('Réservation non trouvée');
+    if (reservation.user_id !== req.user.id) throw new ForbiddenError();
+
+    const payments = await queryPromise(db,
+      'SELECT amount, payer_email, created_at FROM reservation_share_payments WHERE reservation_id = ? ORDER BY created_at',
+      [reservationId]
+    );
+    const total = Number(reservation.split_total) || 1;
+    // The organizer's own payment is the reservation itself.
+    const paid = 1 + (payments?.length || 0);
+    res.json({
+      total_shares: total,
+      paid_shares: Math.min(paid, total),
+      share_amount: Number(reservation.price) || 0,
+      payments: payments || [],
+    });
   }));
 
   router.get('/reservations/:id/participants', requireAuth, asyncHandler(async (req, res) => {

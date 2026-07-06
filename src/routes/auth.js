@@ -1,10 +1,13 @@
 const express = require('express');
 const bcrypt = require('bcrypt');
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
-const { queryOne, insert, getClubIdByName } = require('../utils/dbHelpers');
+const { queryOne, queryPromise, insert, getClubIdByName } = require('../utils/dbHelpers');
 const { validate, schemas } = require('../middleware/validation');
 const { asyncHandler, ConflictError, UnauthorizedError, NotFoundError } = require('../middleware/errorHandler');
+const { requireAuth } = require('../middleware/auth');
+const emailService = require('../services/emailService');
 const { logger } = require('../utils/logger');
 
 const TOKEN_TTL = process.env.JWT_TTL || '2h';
@@ -25,6 +28,18 @@ const loginLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'Trop de tentatives, réessayez plus tard.' },
 });
+
+const resetLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Trop de tentatives, réessayez plus tard.' },
+});
+
+function hashResetToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
 
 module.exports = (db, jwtSecret) => {
   const router = express.Router();
@@ -61,6 +76,9 @@ module.exports = (db, jwtSecret) => {
     );
 
     logger.info(`User registered id=${user.id}`);
+    emailService.sendWelcome(user.email, first_name.trim()).catch(e => {
+      logger.error('sendWelcome failed: ' + e.message);
+    });
     res.json({ ...user, first_name: first_name.trim(), last_name: last_name.trim(), token });
   }));
 
@@ -81,6 +99,55 @@ module.exports = (db, jwtSecret) => {
 
     logger.info(`User login id=${user.id}`);
     res.json({ id: user.id, name: user.name, email: user.email, role: user.role, club_id: user.club_id, token });
+  }));
+
+  // Validates the bearer token and returns fresh user data.
+  router.get('/me', requireAuth, asyncHandler(async (req, res) => {
+    const user = await queryOne(
+      db,
+      'SELECT id, name, email, role, club_id, username FROM users WHERE id = ?',
+      [req.user.id]
+    );
+    if (!user) throw new UnauthorizedError('Compte introuvable');
+    res.json(user);
+  }));
+
+  // Always answers 200 to avoid account enumeration.
+  router.post('/forgot-password', resetLimiter, validate(schemas.forgotPassword), asyncHandler(async (req, res) => {
+    const { email } = req.body;
+    const user = await queryOne(db, 'SELECT id, email FROM users WHERE email = ?', [email]);
+    if (user) {
+      const token = crypto.randomBytes(32).toString('hex');
+      await queryPromise(db,
+        'INSERT INTO password_resets (user_id, token_hash, expires_at, created_at) VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 1 HOUR), NOW())',
+        [user.id, hashResetToken(token)]
+      );
+      const baseUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+      const resetUrl = `${baseUrl}/reinitialiser-mot-de-passe?token=${token}`;
+      emailService.sendPasswordReset(user.email, resetUrl).catch(e => {
+        logger.error('sendPasswordReset failed: ' + e.message);
+      });
+      logger.info(`Password reset requested for user id=${user.id}`);
+    }
+    res.json({ success: true, message: 'Si un compte existe pour cet email, un lien de réinitialisation a été envoyé.' });
+  }));
+
+  router.post('/reset-password', resetLimiter, validate(schemas.resetPassword), asyncHandler(async (req, res) => {
+    const { token, password } = req.body;
+    const row = await queryOne(db,
+      'SELECT id, user_id FROM password_resets WHERE token_hash = ? AND used_at IS NULL AND expires_at > NOW() LIMIT 1',
+      [hashResetToken(token)]
+    );
+    if (!row) throw new UnauthorizedError('Lien invalide ou expiré. Refais une demande de réinitialisation.');
+
+    const hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+    await queryPromise(db, 'UPDATE users SET password_hash = ? WHERE id = ?', [hash, row.user_id]);
+    await queryPromise(db, 'UPDATE password_resets SET used_at = NOW() WHERE id = ?', [row.id]);
+    // Invalidate any other outstanding links for this user.
+    await queryPromise(db, 'UPDATE password_resets SET used_at = NOW() WHERE user_id = ? AND used_at IS NULL', [row.user_id]);
+
+    logger.info(`Password reset completed for user id=${row.user_id}`);
+    res.json({ success: true });
   }));
 
   return router;

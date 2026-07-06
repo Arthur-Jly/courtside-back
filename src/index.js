@@ -55,16 +55,19 @@ const db = mysql.createPool({
   queueLimit: 0,
 });
 
+const { runMigrations } = require('./services/migrationRunner');
+
 db.getConnection((err, conn) => {
   if (err) {
     logger.error('MySQL connection error: ' + err.message);
     process.exit(1);
   }
-  // Add lat/lng columns to announcements if missing (idempotent)
-  conn.query('ALTER TABLE announcements ADD COLUMN lat DECIMAL(10,8) NULL', () => {});
-  conn.query('ALTER TABLE announcements ADD COLUMN lng DECIMAL(11,8) NULL', () => {});
   conn.release();
   logger.info('Connected to MySQL');
+  runMigrations(db).catch(e => {
+    logger.error('Migration error: ' + e.message);
+    process.exit(1);
+  });
 });
 
 // CRITICAL: Stripe webhook needs RAW body. Mount BEFORE express.json().
@@ -110,6 +113,9 @@ const geocodingRouter = require('./routes/geocoding')(db);
 const reviewsRouter = require('./routes/reviews')(db);
 const financesRouter = require('./routes/finances')(db);
 const announcementsRouter = require('./routes/announcements')(db);
+const notificationsRouter = require('./routes/notifications')(db);
+const realtimeRouter = require('./routes/realtime')();
+const newsletterRouter = require('./routes/newsletter')(db);
 const paymentsRouter = paymentsModule(db);
 
 const CronService = require('./services/cronService');
@@ -128,6 +134,9 @@ app.use('/api', geocodingRouter);
 app.use('/api', reviewsRouter);
 app.use('/api', financesRouter);
 app.use('/api', announcementsRouter);
+app.use('/api', notificationsRouter);
+app.use('/api', realtimeRouter);
+app.use('/api', newsletterRouter);
 app.use('/api', paymentsRouter);
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Route not found' }));

@@ -1,0 +1,56 @@
+# Dev stack: MySQL + API + front in one command.
+#   docker compose up --build
+# The front is built from the sibling repo ../courtside-front.
+services:
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: sport
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-devpassword}
+    ports:
+      - "3306:3306"
+    volumes:
+      - dbdata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${DB_PASSWORD:-devpassword}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      DB_HOST: db
+      DB_USER: root
+      DB_PASSWORD: ${DB_PASSWORD:-devpassword}
+      DB_NAME: sport
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      CORS_ORIGIN: http://localhost:8080
+      FRONTEND_URL: http://localhost:8080
+      PRIVATE_STRIPE_KEY: ${PRIVATE_STRIPE_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-}
+    ports:
+      - "3001:3001"
+    volumes:
+      - uploads:/app/uploads
+
+  front:
+    build:
+      context: ../courtside-front
+      args:
+        VITE_API_URL: http://localhost:3001/api
+        VITE_GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-}
+    depends_on:
+      - api
+    ports:
+      - "8080:80"
+
+volumes:
+  dbdata:
+  uploads:

@@ -373,56 +373,6 @@ class ClubsController {
   }
 
   /**
-   * Récupère les sports d'un club
-   * @param {number} clubId - ID du club
-   * @returns {Promise<Array>} Liste des sports
-   */
-  async getClubSports(clubId) {
-    const sql = 'SELECT id, sport_name FROM club_sports WHERE club_id = ?';
-    
-    return new Promise((resolve, reject) => {
-      this.db.query(sql, [clubId], (err, sports) => {
-        if (err) reject(err);
-        else resolve(sports || []);
-      });
-    });
-  }
-
-  /**
-   * Ajoute un sport à un club
-   * @param {number} clubId - ID du club
-   * @param {string} sportName - Nom du sport
-   * @returns {Promise<Object>} Sport ajouté
-   */
-  async addClubSport(clubId, sportName) {
-    const sql = 'INSERT INTO club_sports (club_id, sport_name) VALUES (?, ?)';
-    
-    return new Promise((resolve, reject) => {
-      this.db.query(sql, [clubId, sportName], (err, result) => {
-        if (err) reject(err);
-        else resolve({ id: result.insertId, club_id: clubId, sport_name: sportName });
-      });
-    });
-  }
-
-  /**
-   * Supprime un sport d'un club
-   * @param {number} clubId - ID du club
-   * @param {string} sportName - Nom du sport
-   * @returns {Promise<void>}
-   */
-  async removeClubSport(clubId, sportName) {
-    const sql = 'DELETE FROM club_sports WHERE club_id = ? AND sport_name = ?';
-    
-    return new Promise((resolve, reject) => {
-      this.db.query(sql, [clubId, sportName], (err) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
-  }
-
-  /**
    * Crée un nouveau terrain
    * @param {Object} terrainData - Données du terrain
    * @returns {Promise<Object>} Terrain créé

@@ -65,6 +65,38 @@ module.exports = (db) => {
     res.json(rows);
   }));
 
+  // Batch availability: earliest free slot times per club for a day.
+  // One query for the whole visible search list instead of N per-court calls.
+  router.post('/clubs/availability', asyncHandler(async (req, res) => {
+    const rawIds = Array.isArray(req.body?.club_ids) ? req.body.club_ids : [];
+    const ids = [...new Set(rawIds.map(Number).filter(n => Number.isFinite(n) && n > 0))].slice(0, 60);
+    if (ids.length === 0) return res.json({});
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(req.body?.date) ? req.body.date : null;
+
+    const placeholders = ids.map(() => '?').join(',');
+    const params = [...ids];
+    let dateCond = 's.date >= CURDATE()';
+    if (date) { dateCond = 'DATE(s.date) = ?'; params.push(date); }
+
+    const [rows] = await pool.query(`
+      SELECT t.club_id AS club_id, TIME_FORMAT(s.start_time, '%H:%i') AS time
+      FROM slots s
+      JOIN terrains t ON t.id = s.terrain_id
+      WHERE t.club_id IN (${placeholders})
+        AND s.status = 'free'
+        AND ${dateCond}
+      ORDER BY t.club_id, s.date, s.start_time
+    `, params);
+
+    const out = {};
+    for (const r of rows) {
+      const key = String(r.club_id);
+      if (!out[key]) out[key] = [];
+      if (out[key].length < 5 && !out[key].includes(r.time)) out[key].push(r.time);
+    }
+    res.json(out);
+  }));
+
   router.get('/clubs/stream', asyncHandler(async (req, res) => {
     const { lat, lon, sport, sport_type, radius, limit, city } = req.query;
     const sportFilter = sport_type || sport;

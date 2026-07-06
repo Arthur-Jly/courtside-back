@@ -1,4 +1,6 @@
 const { logger } = require('../utils/logger');
+const emailService = require('../services/emailService');
+const { notify } = require('../utils/notify');
 
 module.exports = function (db) {
   const pool = (db && typeof db.promise === 'function') ? db.promise() : db;
@@ -60,9 +62,9 @@ module.exports = function (db) {
       quantity: 1,
     }];
 
-    const baseUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-    const successUrl = `${baseUrl}/?payment_session={CHECKOUT_SESSION_ID}`;
-    const cancelUrl = `${baseUrl}/?payment=canceled`;
+    const baseUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    const successUrl = `${baseUrl}/paiement/succes?session_id={CHECKOUT_SESSION_ID}`;
+    const cancelUrl = `${baseUrl}/paiement/annule`;
 
     const metadataPayload = {
       reservationData: JSON.stringify(reservationData).slice(0, 4000),
@@ -130,6 +132,34 @@ module.exports = function (db) {
       return;
     }
     try {
+      // Share payments (a teammate paying their part of a split
+      // reservation) record the payment and never create a reservation.
+      const shareForReservation = Number(session.metadata?.share_for_reservation);
+      if (Number.isFinite(shareForReservation) && shareForReservation > 0) {
+        await pool.query(`
+          INSERT IGNORE INTO reservation_share_payments
+            (reservation_id, stripe_session_id, amount, payer_email, created_at)
+          VALUES (?, ?, ?, ?, NOW())
+        `, [
+          shareForReservation,
+          session.id,
+          session.amount_total != null ? session.amount_total / 100 : 0,
+          session.customer_email || session.customer_details?.email || null,
+        ]);
+        logger.info(`Share payment recorded for reservation ${shareForReservation}`);
+        return;
+      }
+      // Idempotence: the webhook and the confirm-payment fallback can both fire
+      // for the same Checkout session — only the first one may create the reservation.
+      const [existing] = await pool.query(
+        'SELECT id FROM reservations WHERE stripe_session_id = ? LIMIT 1',
+        [session.id]
+      );
+      if (existing?.length > 0) {
+        logger.info(`Session ${session.id} already processed (reservation ${existing[0].id})`);
+        return;
+      }
+
       const metadata = session.metadata || {};
       const reservationData = metadata.reservationData ? JSON.parse(metadata.reservationData) : {};
       const slotIdFromMetadata = metadata.slotId ? Number(metadata.slotId) : reservationData.slotId;
@@ -198,11 +228,30 @@ module.exports = function (db) {
       const startDateTime = `${date} ${normalizedStart}`;
       const endDateTime = `${date} ${normalizedEnd}`;
 
+      // Split into 4 players by default (matches the frontend price per person).
+      const splitTotal = splitPayment ? 4 : null;
       const [reservationResult] = await pool.query(
-        'INSERT INTO reservations (user_id, terrain_id, start_time, end_time, price, status, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())',
-        [userId, terrainId, startDateTime, endDateTime, splitPayment ? pricePerPerson : totalPrice, 'confirmed']
+        'INSERT INTO reservations (user_id, terrain_id, start_time, end_time, price, status, stripe_session_id, split_total, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())',
+        [userId, terrainId, startDateTime, endDateTime, splitPayment ? pricePerPerson : totalPrice, 'confirmed', session.id, splitTotal]
       );
       const reservationId = reservationResult.insertId;
+
+      // Confirmation email + in-app notification (both fire-and-forget).
+      const confirmationEmail = session.customer_email || session.customer_details?.email;
+      if (confirmationEmail) {
+        emailService.sendReservationConfirmed(confirmationEmail, {
+          courtName: court.name,
+          date,
+          slot: metadata.slot || `${normalizedStart.slice(0, 5)} - ${normalizedEnd.slice(0, 5)}`,
+          amount: session.amount_total != null ? session.amount_total / 100 : undefined,
+        }).catch(e => logger.error('sendReservationConfirmed failed: ' + e.message));
+      }
+      notify(db, userId, 'reservation_confirmed', {
+        reservation_id: reservationId,
+        court_name: court.name || '',
+        date,
+        slot: metadata.slot || '',
+      });
 
       const updateSlotById = async (slotId) => {
         if (!slotId) return 0;
@@ -302,5 +351,55 @@ module.exports = function (db) {
     }
   }
 
-  return { createCheckoutSession, handleWebhook, confirmPayment, getSessionDetails };
+  /**
+   * Split fare: the organizer generates a payment link for one teammate's
+   * share of an already-paid reservation. The link is a plain Stripe
+   * Checkout URL — shareable in any chat, no account required to pay.
+   */
+  async function createShareLink(req, res) {
+    if (!ensureStripe(res)) return;
+    const { checkout_session_id } = req.body || {};
+    if (!checkout_session_id || !/^cs_[a-zA-Z0-9_]{10,}$/.test(checkout_session_id)) {
+      return res.status(400).json({ error: 'Session ID invalide' });
+    }
+    try {
+      const [rows] = await pool.query(
+        'SELECT id, user_id, price FROM reservations WHERE stripe_session_id = ? LIMIT 1',
+        [checkout_session_id]
+      );
+      const reservation = rows?.[0];
+      if (!reservation) return res.status(404).json({ error: 'Réservation introuvable' });
+      if (Number(reservation.user_id) !== Number(req.user?.id)) {
+        return res.status(403).json({ error: 'Accès refusé' });
+      }
+      const amount = sanitizeNumber(reservation.price, { min: 0.5, max: 10000 });
+      if (amount === null) return res.status(400).json({ error: 'Montant de part invalide' });
+
+      const baseUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+      const session = await stripe.checkout.sessions.create({
+        payment_method_types: ['card'],
+        line_items: [{
+          price_data: {
+            currency: 'eur',
+            product_data: {
+              name: 'Ta part du terrain — Courtside',
+              description: 'Part d\'une réservation partagée',
+            },
+            unit_amount: Math.round(amount * 100),
+          },
+          quantity: 1,
+        }],
+        mode: 'payment',
+        success_url: `${baseUrl}/paiement/succes?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${baseUrl}/paiement/annule`,
+        metadata: { share_for_reservation: String(reservation.id) },
+      });
+      res.json({ url: session.url, amount });
+    } catch (e) {
+      logger.error('createShareLink error: ' + e.message);
+      res.status(502).json({ error: 'Erreur lors de la création du lien de paiement' });
+    }
+  }
+
+  return { createCheckoutSession, handleWebhook, confirmPayment, getSessionDetails, createShareLink };
 };

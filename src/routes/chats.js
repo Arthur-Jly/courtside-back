@@ -2,13 +2,12 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const crypto = require('crypto');
-const fs = require('fs');
 const { requireAuth } = require('../middleware/auth');
 const { asyncHandler, ForbiddenError } = require('../middleware/errorHandler');
 const { queryPromise, queryOne, insert } = require('../utils/dbHelpers');
+const sseHub = require('../services/sseHub');
 
-const UPLOAD_DIR = path.join(__dirname, '../../uploads/chats');
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+const { saveFile } = require('../services/storageService');
 
 const ALLOWED_MIME = new Set([
   'image/jpeg', 'image/png', 'image/gif', 'image/webp',
@@ -16,15 +15,10 @@ const ALLOWED_MIME = new Set([
 ]);
 const ALLOWED_EXT = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.pdf']);
 
+// Files are buffered in memory then persisted via the storage service
+// (S3 in production, local disk in dev).
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
-    filename: (_req, file, cb) => {
-      const ext = path.extname(file.originalname).toLowerCase();
-      const safeExt = ALLOWED_EXT.has(ext) ? ext : '';
-      cb(null, `${Date.now()}-${crypto.randomBytes(12).toString('hex')}${safeExt}`);
-    },
-  }),
+  storage: multer.memoryStorage(),
   limits: {
     fileSize: 5 * 1024 * 1024, // 5 MB
     files: 1,
@@ -37,6 +31,12 @@ const upload = multer({
     cb(null, true);
   },
 });
+
+function uploadFilename(originalname) {
+  const ext = path.extname(originalname).toLowerCase();
+  const safeExt = ALLOWED_EXT.has(ext) ? ext : '';
+  return `${Date.now()}-${crypto.randomBytes(12).toString('hex')}${safeExt}`;
+}
 
 async function assertChatMember(db, chatId, userId) {
   const row = await queryOne(
@@ -62,6 +62,10 @@ module.exports = (db) => {
           SELECT u.avatar FROM chat_participants cp2 JOIN users u ON cp2.user_id = u.id
           WHERE cp2.chat_id = c.id AND cp2.user_id != ? LIMIT 1
         ) ELSE NULL END as avatar,
+        CASE WHEN c.type = 'private' THEN (
+          SELECT cp2.user_id FROM chat_participants cp2
+          WHERE cp2.chat_id = c.id AND cp2.user_id != ? LIMIT 1
+        ) ELSE NULL END as other_user_id,
         (SELECT m.content FROM messages m WHERE m.chat_id = c.id ORDER BY m.created_at DESC LIMIT 1) as lastMessage,
         (SELECT m.created_at FROM messages m WHERE m.chat_id = c.id ORDER BY m.created_at DESC LIMIT 1) as lastMessageTime,
         (SELECT COUNT(*) FROM messages m
@@ -78,7 +82,7 @@ module.exports = (db) => {
       ) DESC
       LIMIT 200
     `;
-    const chats = await queryPromise(db, sql, [userId, userId, userId, userId, userId]);
+    const chats = await queryPromise(db, sql, [userId, userId, userId, userId, userId, userId]);
     res.json(chats);
   }));
 
@@ -184,6 +188,36 @@ module.exports = (db) => {
     res.json(chat);
   }));
 
+  // Group chat creation (friends picker in the frontend).
+  router.post('/chats/group', requireAuth, asyncHandler(async (req, res) => {
+    const creatorId = req.user.id;
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, 100) : '';
+    const memberIds = Array.isArray(req.body?.member_ids)
+      ? [...new Set(req.body.member_ids.map(Number).filter(id => Number.isFinite(id) && id > 0 && id !== creatorId))]
+      : [];
+    if (!name) return res.status(400).json({ error: 'Nom du groupe requis' });
+    if (memberIds.length < 1 || memberIds.length > 30) {
+      return res.status(400).json({ error: 'Entre 1 et 30 membres requis' });
+    }
+
+    const chatId = await insert(db,
+      "INSERT INTO chats (type, name, status, created_at) VALUES ('group', ?, 'accepted', NOW())",
+      [name]
+    );
+    const values = [[chatId, creatorId, 'admin'], ...memberIds.map(id => [chatId, id, 'member'])];
+    const placeholders = values.map(() => '(?, ?, ?, NOW(), NOW())').join(', ');
+    await queryPromise(db,
+      `INSERT INTO chat_participants (chat_id, user_id, role, joined_at, last_read_at) VALUES ${placeholders}`,
+      values.flat()
+    );
+
+    for (const id of memberIds) {
+      sseHub.push(id, 'message', { chat_id: chatId });
+    }
+    const chat = await queryOne(db, 'SELECT * FROM chats WHERE id = ?', [chatId]);
+    res.status(201).json({ ...chat, display_name: name });
+  }));
+
   router.put('/chats/:chat_id/accept', requireAuth, asyncHandler(async (req, res) => {
     const chatId = Number(req.params.chat_id);
     if (!Number.isFinite(chatId)) return res.status(400).json({ error: 'chat_id invalide' });
@@ -198,29 +232,43 @@ module.exports = (db) => {
   router.post('/chats/:chat_id/messages', requireAuth, upload.single('file'), asyncHandler(async (req, res) => {
     const chatId = Number(req.params.chat_id);
     if (!Number.isFinite(chatId)) {
-      if (req.file) try { fs.unlinkSync(req.file.path); } catch {}
       return res.status(400).json({ error: 'chat_id invalide' });
     }
-    try {
-      await assertChatMember(db, chatId, req.user.id);
-    } catch (e) {
-      if (req.file) try { fs.unlinkSync(req.file.path); } catch {}
-      throw e;
-    }
+    await assertChatMember(db, chatId, req.user.id);
 
     const senderId = req.user.id;
     const rawContent = typeof req.body?.content === 'string' ? req.body.content : '';
     const content = rawContent.slice(0, 4000);
     const file_type = typeof req.body?.file_type === 'string' ? req.body.file_type.slice(0, 50) : null;
-    const file_url = req.file ? `/uploads/chats/${req.file.filename}` : null;
+    let file_url = null;
+    if (req.file) {
+      file_url = await saveFile(req.file.buffer, 'chats', uploadFilename(req.file.originalname), req.file.mimetype);
+    }
 
-    if ((!content || content.trim() === '') && !file_url) {
+    // Structured messages (booking proposals) carry their data in metadata.
+    const messageType = req.body?.message_type === 'booking_request' ? 'booking_request' : 'text';
+    let metadata = null;
+    if (messageType === 'booking_request' && req.body?.booking_data && typeof req.body.booking_data === 'object') {
+      metadata = JSON.stringify(req.body.booking_data).slice(0, 2000);
+    }
+
+    if ((!content || content.trim() === '') && !file_url && !metadata) {
       return res.status(400).json({ error: 'Le message doit contenir du texte ou un fichier.' });
     }
     const messageId = await insert(db, `
-      INSERT INTO messages (chat_id, sender_id, content, created_at, file_url, file_type)
-      VALUES (?, ?, ?, NOW(), ?, ?)
-    `, [chatId, senderId, content || null, file_url, file_type]);
+      INSERT INTO messages (chat_id, sender_id, content, created_at, file_url, file_type, message_type, metadata)
+      VALUES (?, ?, ?, NOW(), ?, ?, ?, ?)
+    `, [chatId, senderId, content || null, file_url, file_type, messageType, metadata]);
+
+    // Real-time: wake up the other participants.
+    try {
+      const others = await queryPromise(db,
+        'SELECT user_id FROM chat_participants WHERE chat_id = ? AND user_id != ?',
+        [chatId, senderId]
+      );
+      for (const p of others) sseHub.push(p.user_id, 'message', { chat_id: chatId });
+    } catch { /* realtime is best-effort */ }
+
     res.json({ success: true, message_id: messageId, file_url });
   }));
 

@@ -1,5 +1,5 @@
 const express = require('express');
-const { requireAuth, requireClubAdmin } = require('../middleware/auth');
+const { requireAuth, requireClubAdmin, requireOwnClub } = require('../middleware/auth');
 
 module.exports = function (db) {
   const router = express.Router();
@@ -7,6 +7,7 @@ module.exports = function (db) {
 
   router.get('/terrains/:id/slots', controller.listSlots);
   router.get('/clubs/:id/slots', controller.listSlotsByClub);
+  router.get('/clubs/:id/occupancy', requireAuth, requireOwnClub('id'), controller.clubOccupancy);
 
   router.post('/slots/:id/book', requireAuth, controller.bookSlot);
   router.post('/reservations/:id/cancel', requireAuth, controller.cancelReservation);
@@ -18,6 +19,8 @@ module.exports = function (db) {
   router.delete('/admin/slots/cleanup', requireAuth, requireClubAdmin, controller.adminCleanupSlots);
   router.post('/admin/remove-duplicate-slots', requireAuth, requireClubAdmin, controller.adminRemoveDuplicateSlots);
   router.post('/admin/truncate-slots', requireAuth, requireClubAdmin, controller.adminTruncateSlots);
+  router.post('/admin/slots/block', requireAuth, requireClubAdmin, controller.adminBlockSlot);
+  router.delete('/admin/slots/:id/block', requireAuth, requireClubAdmin, controller.adminUnblockSlot);
 
   return router;
 };
