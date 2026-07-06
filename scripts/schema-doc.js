@@ -50,6 +50,8 @@ Conventions :
 - Toutes les relations portent une vraie FOREIGN KEY : \`CASCADE\` pour les lignes enfants pures, \`SET NULL\` pour l'historique qui survit au parent.
 - La suppression de compte (RGPD) anonymise la ligne \`users\`, elle ne la supprime pas.
 - Charset \`utf8mb4\`. Timestamps : mélange \`timestamp\`/\`datetime\` hérité (comportement identique pour l'app).
+- Quirk hérité assumé : coordonnées nommées \`lat\`/\`lon\` sur \`clubs\` mais \`lat\`/\`lng\` sur \`announcements\` (précisions différentes aussi) — renommer casserait plus que ça ne rapporte.
+- Base vierge : provisionnée d'un coup par \`src/migrations/baseline.sql\` (régénéré via \`npm run schema:baseline\`) ; bases existantes : migrations incrémentales.
 
 `;
 
