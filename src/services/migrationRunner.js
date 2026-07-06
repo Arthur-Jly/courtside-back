@@ -7,6 +7,9 @@
  * - "Already exists" errors (table 1050, column 1060, index 1061) and
  *   "already dropped" errors (index/column 1091, check constraint 3821)
  *   are tolerated so migrations can run on legacy databases in any state.
+ * - FRESH database (no tables): baseline.sql (full schema, regenerated via
+ *   `npm run schema:baseline`) is executed instead, and every numbered
+ *   migration is recorded as applied — they are already folded into it.
  *
  * Used at server boot and via `npm run migrate`.
  */
@@ -38,6 +41,10 @@ function splitStatements(sql) {
 }
 
 async function runMigrations(db) {
+  // Fresh database? (checked before creating schema_migrations)
+  const tableCount = (await query(db,
+    'SELECT COUNT(*) AS n FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()'))[0].n;
+
   await query(db, `CREATE TABLE IF NOT EXISTS schema_migrations (
     filename VARCHAR(255) PRIMARY KEY,
     applied_at DATETIME NOT NULL
@@ -48,6 +55,19 @@ async function runMigrations(db) {
   const files = fs.readdirSync(MIGRATIONS_DIR)
     .filter(f => /^\d+_.+\.sql$/.test(f))
     .sort();
+
+  const baselinePath = path.join(MIGRATIONS_DIR, 'baseline.sql');
+  if (tableCount === 0 && fs.existsSync(baselinePath)) {
+    logger.info('Fresh database: provisioning full schema from baseline.sql');
+    for (const statement of splitStatements(fs.readFileSync(baselinePath, 'utf8'))) {
+      await query(db, statement);
+    }
+    for (const file of files) {
+      await query(db, 'INSERT INTO schema_migrations (filename, applied_at) VALUES (?, NOW())', [file]);
+    }
+    logger.info(`Baseline applied — ${files.length} migrations recorded as included`);
+    return files.length;
+  }
 
   const appliedRows = await query(db, 'SELECT filename FROM schema_migrations');
   const applied = new Set(appliedRows.map(r => r.filename));
