@@ -4,8 +4,9 @@
  * - Files live in src/migrations/*.sql, applied in filename order.
  * - Applied filenames are recorded in schema_migrations.
  * - Statements are separated by a semicolon at end of line.
- * - "Already exists" errors (table 1050, column 1060, index 1061) are
- *   tolerated so baseline migrations can run on legacy databases.
+ * - "Already exists" errors (table 1050, column 1060, index 1061) and
+ *   "already dropped" errors (index/column 1091, check constraint 3821)
+ *   are tolerated so migrations can run on legacy databases in any state.
  *
  * Used at server boot and via `npm run migrate`.
  */
@@ -13,7 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const { logger } = require('../utils/logger');
 
-const TOLERATED_ERRNOS = new Set([1050, 1060, 1061]);
+const TOLERATED_ERRNOS = new Set([1050, 1060, 1061, 1091, 3821]);
 const MIGRATIONS_DIR = path.join(__dirname, '..', 'migrations');
 
 function query(db, sql, params = []) {
@@ -23,7 +24,14 @@ function query(db, sql, params = []) {
 }
 
 function splitStatements(sql) {
-  return sql
+  // Strip full-line "--" comments first, otherwise a leading comment block
+  // (no trailing semicolon) glues onto the next statement and the whole
+  // chunk gets dropped by the startsWith('--') filter below.
+  const stripped = sql
+    .split(/\r?\n/)
+    .filter(line => !line.trim().startsWith('--'))
+    .join('\n');
+  return stripped
     .split(/;\s*(?:\r?\n|$)/)
     .map(s => s.trim())
     .filter(s => s && !s.startsWith('--'));
