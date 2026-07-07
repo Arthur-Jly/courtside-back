@@ -95,4 +95,4 @@ async function runMigrations(db) {
   return ran;
 }
 
-module.exports = { runMigrations };
+module.exports = { runMigrations, splitStatements };
