@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+  checks: write   # dorny/test-reporter publie un check run
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -16,4 +20,17 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
-      - run: npm test
+      - run: npm run test:ci
+      - name: Rapport de tests
+        uses: dorny/test-reporter@v1
+        if: always()   # publié même en échec — on veut voir QUELS tests cassent
+        with:
+          name: Tests back
+          path: junit.xml
+          reporter: java-junit
+      - name: Artefact JUnit
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-back
+          path: junit.xml
