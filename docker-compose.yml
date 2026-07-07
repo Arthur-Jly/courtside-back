@@ -7,6 +7,7 @@ services:
     environment:
       MYSQL_DATABASE: sport
       MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-devpassword}
+      TZ: ${TZ:-Europe/Paris}
     ports:
       - "3306:3306"
     volumes:
@@ -25,6 +26,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3001
+      TZ: ${TZ:-Europe/Paris}
       DB_HOST: db
       DB_USER: root
       DB_PASSWORD: ${DB_PASSWORD:-devpassword}

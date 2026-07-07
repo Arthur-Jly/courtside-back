@@ -9,7 +9,8 @@
     "test": "node --test",
     "lint": "eslint .",
     "migrate": "node scripts/migrate.js",
-    "schema:doc": "node scripts/schema-doc.js ../courtside-front/docs/SCHEMA.md"
+    "schema:doc": "node scripts/schema-doc.js ../courtside-front/docs/SCHEMA.md",
+    "schema:baseline": "node scripts/baseline-schema.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1079.0",

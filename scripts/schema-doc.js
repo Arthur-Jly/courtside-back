@@ -25,7 +25,8 @@ const DOMAINS = [
     FROM information_schema.KEY_COLUMN_USAGE k
     JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA
     WHERE k.TABLE_SCHEMA = DATABASE() AND k.REFERENCED_TABLE_NAME IS NOT NULL ORDER BY k.TABLE_NAME, k.COLUMN_NAME`);
-  const idx = await q(`SELECT TABLE_NAME, INDEX_NAME, NON_UNIQUE, GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS COLS
+  // COLUMN_NAME is NULL for functional index parts — fall back to EXPRESSION.
+  const idx = await q(`SELECT TABLE_NAME, INDEX_NAME, NON_UNIQUE, GROUP_CONCAT(COALESCE(COLUMN_NAME, EXPRESSION) ORDER BY SEQ_IN_INDEX) AS COLS
     FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE()
     GROUP BY TABLE_NAME, INDEX_NAME, NON_UNIQUE ORDER BY TABLE_NAME, INDEX_NAME`);
   const checks = await q(`SELECT tc.TABLE_NAME, cc.CONSTRAINT_NAME, cc.CHECK_CLAUSE
@@ -38,9 +39,10 @@ const DOMAINS = [
   const fkCols = new Set(fks.map(f => `${f.TABLE_NAME}.${f.COLUMN_NAME}`));
 
   const esc = (s) => String(s == null ? '' : s).replace(/\|/g, '\\|').replace(/_utf8mb4/g, '').replace(/\\'/g, "'");
+  const lastMigration = (await q('SELECT MAX(filename) f FROM schema_migrations'))[0].f || 'aucune';
   let md = `# Courtside — Schéma de base de données
 
-> Généré depuis la base MySQL \`sport\` le ${new Date().toISOString().slice(0, 10)} (post-migration 013).
+> Généré depuis la base MySQL \`sport\` le ${new Date().toISOString().slice(0, 10)} (dernière migration : \`${lastMigration}\`).
 > À régénérer après toute migration : voir \`courtside-back/src/migrations/\`.
 
 Conventions :
@@ -48,6 +50,8 @@ Conventions :
 - Toutes les relations portent une vraie FOREIGN KEY : \`CASCADE\` pour les lignes enfants pures, \`SET NULL\` pour l'historique qui survit au parent.
 - La suppression de compte (RGPD) anonymise la ligne \`users\`, elle ne la supprime pas.
 - Charset \`utf8mb4\`. Timestamps : mélange \`timestamp\`/\`datetime\` hérité (comportement identique pour l'app).
+- Quirk hérité assumé : coordonnées nommées \`lat\`/\`lon\` sur \`clubs\` mais \`lat\`/\`lng\` sur \`announcements\` (précisions différentes aussi) — renommer casserait plus que ça ne rapporte.
+- Base vierge : provisionnée d'un coup par \`src/migrations/baseline.sql\` (régénéré via \`npm run schema:baseline\`) ; bases existantes : migrations incrémentales.
 
 `;
 
