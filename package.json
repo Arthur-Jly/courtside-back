@@ -11,7 +11,8 @@
     "migrate": "node scripts/migrate.js",
     "schema:doc": "node scripts/schema-doc.js ../courtside-front/docs/SCHEMA.md",
     "schema:baseline": "node scripts/baseline-schema.js",
-    "test:ci": "node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=junit.xml \"test/*.test.js\""
+    "test:ci": "node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=junit.xml \"test/*.test.js\"",
+    "test:integration": "node --test \"test/integration/*.int.test.js\""
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1079.0",
