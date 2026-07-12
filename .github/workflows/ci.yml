@@ -1,9 +1,8 @@
 name: CI
 
+# À chaque commit poussé, sur toutes les branches.
 on:
   push:
-    branches: [main]
-  pull_request:
 
 permissions:
   contents: read
