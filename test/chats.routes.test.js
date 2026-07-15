@@ -22,9 +22,10 @@ function makeApp(db) {
 }
 
 // ── BK-CHAT-01 : chat privé idempotent ──────────────────────────────────────
-test('BK-CHAT-01 création chat privé : 2 appels même paire -> même chat', async () => {
+test('BK-CHAT-01 création chat privé : 2 appels même paire -> même chat, réponse enrichie', async () => {
   let created = null;
   const db = fakeDb([
+    [/SELECT id, name, avatar FROM users WHERE id/, () => [{ id: 55, name: 'Léa Marchand', avatar: null }]],
     [/SELECT \* FROM chats\s+WHERE type = 'private'/, () => (created ? [created] : [])],
     [/SELECT status FROM amis/, () => [{ status: 'accepted' }]],
     [/INSERT INTO chats/, () => { created = { id: 88, type: 'private', status: 'accepted' }; return { insertId: 88 }; }],
@@ -34,9 +35,14 @@ test('BK-CHAT-01 création chat privé : 2 appels même paire -> même chat', as
   const { server, url } = await listen(makeApp(db));
   try {
     let res = await postJson(`${url}/api/chats`, { user_id_2: 55 }, AUTH);
-    assert.equal((await res.json()).id, 88);
+    let body = await res.json();
+    assert.equal(body.id, 88);
+    assert.equal(body.display_name, 'Léa Marchand', 'jamais « Inconnu » côté créateur');
+    assert.equal(body.other_user_id, 55);
     res = await postJson(`${url}/api/chats`, { user_id_2: 55 }, AUTH);
-    assert.equal((await res.json()).id, 88);
+    body = await res.json();
+    assert.equal(body.id, 88);
+    assert.equal(body.display_name, 'Léa Marchand', 'idem sur le chat existant');
     assert.equal(db.calls.filter(c => /INSERT INTO chats\b/.test(c.sql)).length, 1, 'un seul chat');
   } finally { server.close(); }
 });
@@ -54,6 +60,7 @@ test('BK-CHAT-01b chat avec soi-même ou id invalide -> 400', async () => {
 test('BK-CHAT-01c non-amis -> chat créé en statut pending', async () => {
   let insertedStatus = null;
   const db = fakeDb([
+    [/SELECT id, name, avatar FROM users WHERE id/, () => [{ id: 55, name: 'Léa', avatar: null }]],
     [/SELECT \* FROM chats\s+WHERE type = 'private'/, () => []],
     [/SELECT status FROM amis/, () => []], // pas amis
     [/INSERT INTO chats/, (params) => { insertedStatus = params[0]; return { insertId: 89 }; }],

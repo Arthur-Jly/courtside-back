@@ -20,19 +20,21 @@ function makeApp(db) {
   return app;
 }
 
-const ROW = {
-  id: 1, title: 'Session Basketball', location: 'Gymnase', address: '45 rue X',
-  sport: 'Basketball', time: '18h30', currentPlayers: 6, maxPlayers: 10,
-  level: 'Intermédiaire', distance: '1.2km', description: 'Match', organizer: 'Alex',
-  image: null, created_at: '2026-07-01',
+const TODAY = new Date().toISOString().slice(0, 10);
+const SLOT_ROW = {
+  id: 42, date: TODAY, start_time: '18:30:00', end_time: '20:00:00',
+  terrain_id: 2, sport_type: 'padel', terrain_name: 'Padel 1', price_per_hour: 20,
+  club_name: 'Club Test', address: '1 rue du Test', city: 'Lyon',
 };
 
-// ── BK-LM : lastminute — alias camelCase préservés après le rename SQL ──────
-test('BK-LM-01 GET /lastminute : forme API stable (currentPlayers/maxPlayers)', async () => {
+// ── BK-LM : lastminute = vrais créneaux libres aujourd'hui/demain ───────────
+test('BK-LM-01 GET /lastminute : créneaux réels des clubs confirmés, forme front', async () => {
   const db = fakeDb([
-    [/SELECT .*current_players AS currentPlayers.* FROM last_minute_slots/s, (params, sql) => {
-      assert.ok(!/SELECT \* FROM/.test(sql), 'colonnes explicites, pas de SELECT *');
-      return [ROW];
+    [/FROM slots s/, (params, sql) => {
+      assert.match(sql, /s\.status = 'free'/, 'créneaux libres uniquement');
+      assert.match(sql, /c\.status = 'confirme'/, 'clubs confirmés uniquement');
+      assert.match(sql, /CURDATE\(\)/, 'fenêtre aujourd hui/demain');
+      return [SLOT_ROW];
     }],
   ]);
   const { server, url } = await listen(makeApp(db));
@@ -41,24 +43,28 @@ test('BK-LM-01 GET /lastminute : forme API stable (currentPlayers/maxPlayers)', 
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(body.count, 1);
-    assert.equal(body.last_minute_slots[0].currentPlayers, 6, 'camelCase préservé pour le front');
-    assert.equal(body.last_minute_slots[0].maxPlayers, 10);
+    const s = body.last_minute_slots[0];
+    assert.equal(s.title, 'Padel — Club Test');
+    assert.equal(s.time, "Aujourd'hui 18h30 — 20h");
+    assert.equal(s.location, 'Club Test, Lyon');
+    assert.equal(s.terrainId, 2, 'permet la navigation vers la fiche terrain');
+    assert.equal(s.price, 20);
   } finally { server.close(); }
 });
 
-test('BK-LM-02 filtres sport/location paramétrés, id inconnu -> 404', async () => {
+test('BK-LM-02 filtres sport/lieu paramétrés, id inconnu -> 404', async () => {
   const db = fakeDb([
-    [/FROM last_minute_slots WHERE id/, () => []],
-    [/FROM last_minute_slots/, (params, sql) => {
-      assert.match(sql, /LOWER\(sport\) = \?/);
+    [/AND s\.id = \?/, () => []],
+    [/FROM slots s/, (params, sql) => {
+      assert.match(sql, /LOWER\(t\.sport_type\) = \?/);
       assert.equal(params[0], 'padel');
-      assert.equal(params.filter(p => p === '%gymnase%').length, 4, 'recherche texte sur 4 colonnes');
+      assert.equal(params.filter(p => p === '%lyon%').length, 3, 'recherche club/adresse/ville');
       return [];
     }],
   ]);
   const { server, url } = await listen(makeApp(db));
   try {
-    let res = await fetch(`${url}/api/lastminute?sport=Padel&location=Gymnase`);
+    let res = await fetch(`${url}/api/lastminute?sport=Padel&location=Lyon`);
     assert.equal(res.status, 200);
     res = await fetch(`${url}/api/lastminute/999`);
     assert.equal(res.status, 404);

@@ -1,84 +1,91 @@
 /**
- * Contrôleur pour la gestion des créneaux last minute
+ * Créneaux "last minute" : les vrais créneaux libres d'aujourd'hui et de
+ * demain dans les clubs confirmés (la table de démo last_minute_slots a été
+ * supprimée en migration 017). La forme de réponse reste celle que le front
+ * consomme : { id, title, sport, time, location, address, terrainId, date }.
  */
 
-// Colonnes exposées à l'API : current_players/max_players sont aliasés en
-// camelCase car le front (FlashPage) consomme les lignes telles quelles.
-const SLOT_COLUMNS = `id, title, location, address, sport, time,
-  current_players AS currentPlayers, max_players AS maxPlayers,
-  level, distance, description, organizer, image, created_at`;
+const LIST_SQL = `
+  SELECT s.id, s.date, s.start_time, s.end_time,
+         t.id AS terrain_id, t.sport_type, t.name AS terrain_name, t.price_per_hour,
+         c.name AS club_name, c.address, c.city
+  FROM slots s
+  JOIN terrains t ON t.id = s.terrain_id
+  JOIN clubs c ON c.id = t.club_id AND c.status = 'confirme'
+  WHERE s.status = 'free'
+    AND ((s.date = CURDATE() AND s.start_time >= CURTIME())
+         OR s.date = DATE_ADD(CURDATE(), INTERVAL 1 DAY))
+`;
+
+function fmtHour(t) {
+  const [h, m] = String(t).split(':');
+  return `${Number(h)}h${m === '00' ? '' : m}`;
+}
+
+// JAMAIS toISOString ici : une DATE MySQL arrive en minuit LOCAL, la convertir
+// en UTC recule d'un jour (TZ Europe/Paris) et "Aujourd'hui" devient "Demain".
+function localYmd(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function toApiShape(row) {
+  const today = localYmd(new Date());
+  const dateStr = row.date instanceof Date ? localYmd(row.date) : String(row.date).slice(0, 10);
+  const day = dateStr === today ? "Aujourd'hui" : 'Demain';
+  const sport = String(row.sport_type || '').toLowerCase();
+  return {
+    id: row.id,
+    terrainId: row.terrain_id,
+    sport,
+    title: `${sport.charAt(0).toUpperCase()}${sport.slice(1)} — ${row.club_name}`,
+    time: `${day} ${fmtHour(row.start_time)} — ${fmtHour(row.end_time)}`,
+    location: [row.club_name, row.city].filter(Boolean).join(', '),
+    address: row.address || null,
+    price: row.price_per_hour != null ? Number(row.price_per_hour) : null,
+    date: dateStr,
+  };
+}
 
 class LastMinuteController {
   constructor(db) {
     this.db = db;
   }
 
-  /**
-   * Récupère les créneaux last minute avec filtres optionnels
-   * @param {Object} filters - Filtres de recherche
-   * @param {string} filters.sport - Sport à filtrer (optionnel)
-   * @param {string} filters.location - Recherche textuelle dans title, location, address et description (optionnel)
-   * @returns {Promise<Array>} Liste des créneaux filtrés
-   */
-  async getLastMinuteSlots(filters = {}) {
-    const { sport, location } = filters;
-    let sql = `SELECT ${SLOT_COLUMNS} FROM last_minute_slots`;
-    const params = [];
-    const conditions = [];
-
-    // Validation et filtrage par sport
-    if (sport && sport !== 'all') {
-      conditions.push('LOWER(sport) = ?');
-      params.push(sport.toLowerCase());
-    }
-
-    // Validation et filtrage par lieu/titre/description
-    if (location && location.trim() !== '') {
-      conditions.push('(LOWER(title) LIKE ? OR LOWER(location) LIKE ? OR LOWER(address) LIKE ? OR LOWER(description) LIKE ?)');
-      const searchPattern = `%${location.toLowerCase()}%`;
-      params.push(searchPattern, searchPattern, searchPattern, searchPattern);
-    }
-
-    // Construction de la requête finale
-    if (conditions.length > 0) {
-      sql += ' WHERE ' + conditions.join(' AND ');
-    }
-
-    // Ajout d'un tri par défaut (plus récents en premier)
-    sql += ' ORDER BY created_at DESC';
-
+  query(sql, params = []) {
     return new Promise((resolve, reject) => {
-      this.db.query(sql, params, (err, slots) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(slots);
-        }
-      });
+      this.db.query(sql, params, (err, rows) => (err ? reject(err) : resolve(rows)));
     });
   }
 
   /**
-   * Récupère un créneau par son ID
-   * @param {number} id - ID du créneau
-   * @returns {Promise<Object>} Créneau trouvé
+   * @param {Object} filters
+   * @param {string} filters.sport - sport exact (optionnel)
+   * @param {string} filters.location - recherche texte club/adresse/ville (optionnel)
    */
+  async getLastMinuteSlots(filters = {}) {
+    const { sport, location } = filters;
+    let sql = LIST_SQL;
+    const params = [];
+
+    if (sport && sport !== 'all') {
+      sql += ' AND LOWER(t.sport_type) = ?';
+      params.push(String(sport).toLowerCase());
+    }
+    if (location && location.trim() !== '') {
+      sql += ' AND (LOWER(c.name) LIKE ? OR LOWER(c.address) LIKE ? OR LOWER(c.city) LIKE ?)';
+      const pattern = `%${location.toLowerCase()}%`;
+      params.push(pattern, pattern, pattern);
+    }
+    sql += ' ORDER BY s.date, s.start_time LIMIT 30';
+
+    const rows = await this.query(sql, params);
+    return rows.map(toApiShape);
+  }
+
   async getSlotById(id) {
-    return new Promise((resolve, reject) => {
-      this.db.query(
-        `SELECT ${SLOT_COLUMNS} FROM last_minute_slots WHERE id = ?`,
-        [id],
-        (err, slots) => {
-          if (err) {
-            reject(err);
-          } else if (slots.length === 0) {
-            reject(new Error('Créneau introuvable'));
-          } else {
-            resolve(slots[0]);
-          }
-        }
-      );
-    });
+    const rows = await this.query(`${LIST_SQL} AND s.id = ?`, [id]);
+    if (rows.length === 0) throw new Error('Créneau introuvable');
+    return toApiShape(rows[0]);
   }
 }
 

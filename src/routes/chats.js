@@ -160,6 +160,17 @@ module.exports = (db) => {
     if (!Number.isFinite(otherId) || otherId === userId1) {
       return res.status(400).json({ error: 'user_id_2 invalide' });
     }
+    // Enrich the raw chats row with the other participant's identity —
+    // the frontend list falls back to "Inconnu" without display_name.
+    const other = await queryOne(db, 'SELECT id, name, avatar FROM users WHERE id = ?', [otherId]);
+    if (!other) return res.status(404).json({ error: 'Utilisateur introuvable' });
+    const enrich = (chat) => ({
+      ...chat,
+      display_name: other.name,
+      other_user_id: other.id,
+      avatar: other.avatar,
+    });
+
     const existing = await queryOne(db, `
       SELECT * FROM chats
       WHERE type = 'private'
@@ -167,7 +178,7 @@ module.exports = (db) => {
         AND id IN (SELECT chat_id FROM chat_participants WHERE user_id = ?)
       LIMIT 1
     `, [userId1, otherId]);
-    if (existing) return res.json(existing);
+    if (existing) return res.json(enrich(existing));
 
     const friendship = await queryOne(db, `
       SELECT status FROM amis
@@ -185,7 +196,7 @@ module.exports = (db) => {
       VALUES (?, ?, 'member', NOW(), NOW()), (?, ?, 'member', NOW(), NOW())
     `, [chatId, userId1, chatId, otherId]);
     const chat = await queryOne(db, 'SELECT * FROM chats WHERE id = ?', [chatId]);
-    res.json(chat);
+    res.json(enrich(chat));
   }));
 
   // Group chat creation (friends picker in the frontend).
