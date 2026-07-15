@@ -48,10 +48,10 @@ after(async () => {
 });
 
 // ── BK-INF-05 : provisioning base vierge ────────────────────────────────────
-test('BK-INF-05 base vierge provisionnée : 36 tables, 53 FK, migrations enregistrées', async () => {
+test('BK-INF-05 base vierge provisionnée : 35 tables, 53 FK, migrations enregistrées', async () => {
   const [tables] = [await db.query(
     'SELECT COUNT(*) n FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()')];
-  assert.equal(tables[0].n, 36);
+  assert.equal(tables[0].n, 35); // 34 métier + schema_migrations (017 a supprimé la table démo)
   const fks = await db.query(
     'SELECT COUNT(*) n FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = DATABASE()');
   assert.equal(fks[0].n, 53);
