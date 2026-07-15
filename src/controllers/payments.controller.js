@@ -45,6 +45,18 @@ module.exports = function (db) {
     const amount = sanitizeNumber(splitPayment ? pricePerPerson : totalPrice, { min: 0.5, max: 10000 });
     if (amount === null) return res.status(400).json({ error: 'Montant invalide' });
 
+    // Refuse before Stripe if the targeted slot is no longer free — the front
+    // shows "Ce créneau vient d'être réservé" on 409.
+    if (reservationData.slotId != null) {
+      const [slotRows] = await pool.query(
+        'SELECT status FROM slots WHERE id = ? LIMIT 1',
+        [reservationData.slotId]
+      );
+      if (slotRows?.length > 0 && slotRows[0].status !== 'free') {
+        return res.status(409).json({ error: 'Ce créneau vient d\'être réservé' });
+      }
+    }
+
     // Always trust the authenticated user's email — never an arbitrary "organizer.email" from the body.
     const customerEmail = req.user?.email || (typeof organizer.email === 'string' ? organizer.email.slice(0, 254) : undefined);
 

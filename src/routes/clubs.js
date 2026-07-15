@@ -138,7 +138,7 @@ module.exports = (db) => {
         `SELECT COUNT(*) AS total_res, SUM(price) AS revenue, COUNT(DISTINCT user_id) AS unique_users
          FROM reservations r
          JOIN slots s ON s.reservation_id = r.id
-         WHERE s.club_id = ? AND DATE_FORMAT(r.date, '%Y-%m') = ?`,
+         WHERE s.club_id = ? AND DATE_FORMAT(r.start_time, '%Y-%m') = ?`,
         [id, currentMonth]
       ),
       pool.query(

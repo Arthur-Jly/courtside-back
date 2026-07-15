@@ -460,7 +460,9 @@ async function cancelReservation(req, res){
   const userId = req.user && req.user.id;
   if(!userId) return res.status(401).json({ ok:false, error:'authentication required' });
 
-  const [rrows] = await pool.query('SELECT id, slot_id, status, user_id, terrain_id FROM reservations WHERE id = ?', [reservationId]);
+  // NB: the slot->reservation link lives on slots.reservation_id (reservations
+  // has no slot_id column) — free the slot through that reverse link.
+  const [rrows] = await pool.query('SELECT id, status, user_id, terrain_id FROM reservations WHERE id = ?', [reservationId]);
   const row = rrows && rrows[0];
   if(!row) return res.status(404).json({ ok:false, error:'reservation not found' });
 
@@ -476,11 +478,7 @@ async function cancelReservation(req, res){
   if(row.status !== 'active' && row.status !== 'confirmed') return res.status(400).json({ ok:false, error:'cannot cancel' });
 
   await pool.query('UPDATE reservations SET status = ? WHERE id = ?', ['cancelled', reservationId]);
-  if (row.slot_id) {
-    await pool.query('UPDATE slots SET status = ? WHERE id = ?', ['free', row.slot_id]);
-  } else {
-    await pool.query('UPDATE slots SET status = ?, reservation_id = NULL WHERE reservation_id = ?', ['free', reservationId]);
-  }
+  await pool.query('UPDATE slots SET status = ?, reservation_id = NULL WHERE reservation_id = ?', ['free', reservationId]);
   res.json({ ok:true });
 }
 

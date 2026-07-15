@@ -1,9 +1,12 @@
 name: CI
 
+# À chaque commit poussé, sur toutes les branches.
 on:
   push:
-    branches: [main]
-  pull_request:
+
+permissions:
+  contents: read
+  checks: write   # dorny/test-reporter publie un check run
 
 jobs:
   check:
@@ -16,4 +19,45 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
-      - run: npm test
+      - run: npm run test:ci
+      - name: Rapport de tests
+        uses: dorny/test-reporter@v1
+        if: always()   # publié même en échec — on veut voir QUELS tests cassent
+        with:
+          name: Tests back
+          path: junit.xml
+          reporter: java-junit
+      - name: Artefact JUnit
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-back
+          path: junit.xml
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost -ptest"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DB_HOST: 127.0.0.1
+      DB_USER: root
+      DB_PASSWORD: test
+      DB_PORT: 3306
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run test:integration

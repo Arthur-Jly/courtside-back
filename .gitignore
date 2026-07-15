@@ -10,3 +10,4 @@ logs/
 *.log
 .idea/
 .vscode/
+junit.xml
