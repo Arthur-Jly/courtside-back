@@ -81,8 +81,9 @@ test('BK-ANN-11 join réussi : purge waitlist du user + notif organisateur', asy
     [/INSERT INTO annonce_participants/, () => ({ insertId: 9 })],
     [/UPDATE announcements SET places_disponibles = places_disponibles - 1/, () => ({})],
     [/DELETE FROM annonce_waitlist/, () => ({})],
-    [/SELECT created_by FROM announcements/, () => [{ created_by: 42 }]],
+    [/SELECT created_by/, () => [{ created_by: 42, city: 'Grenoble', sport_type: 'foot', places_total: 10, places_disponibles: 8, min_participants: 8 }]],
     [/INSERT INTO notifications/, () => ({ insertId: 1 })],
+    [/INSERT INTO analytics_events/, () => ({ insertId: 1 })],
   ]);
   const { server, url } = await listen(makeApp(db));
   try {
@@ -126,12 +127,13 @@ test('BK-ANN-12 leave : place libérée, 1er waitlisté notifié et marqué', as
 // ── BK-ANN-13 : expiration cron ─────────────────────────────────────────────
 test('BK-ANN-13 expiration : annule sous le minimum, libère le slot, garde les autres', async () => {
   const db = fakeDb([
-    [/SELECT a\.id, a\.sport_type, a\.places_total/, () => [
+    [/SELECT a\.id, a\.sport_type, a\.city/, () => [
       { id: 1, participant_count: 1, min_participants: 2, slot_id: 10 },  // sous le min -> annulée
       { id: 2, participant_count: 3, min_participants: 2, slot_id: null }, // ok -> gardée
     ]],
     [/UPDATE announcements SET status = \?/, (params) => { assert.equal(params[0], 'cancelled'); return {}; }],
     [/UPDATE slots SET status = \?/, (params) => { assert.deepEqual(params, ['free', 10]); return {}; }],
+    [/INSERT INTO analytics_events/, () => ({ insertId: 1 })],
   ]);
   const controller = new AnnouncementsController(db);
   const out = await controller.checkAndCancelExpiredAnnouncements();
@@ -280,5 +282,127 @@ test('BK-CHAT-02b chat de session réservé aux participants -> 403', async () =
   try {
     const res = await postJson(`${url}/api/announcements/5/chat`, {}, AUTH);
     assert.equal(res.status, 403);
+  } finally { server.close(); }
+});
+
+// ── BK-ANN-20 : partie sur terrain public (phase 1) ─────────────────────────
+test('BK-ANN-20 création avec public_place_ref : ville et coordonnées viennent du référentiel', async () => {
+  const inserts = [];
+  const db = fakeDb([
+    [/FROM public_places WHERE id/, () => [{
+      id: 12, name: 'City-stade Malherbe', address: '2 rue des Alpes',
+      city: 'Grenoble', lat: '45.170000', lng: '5.720000', verification_status: 'manually_curated',
+    }]],
+    [/INSERT INTO announcements/, (params) => { inserts.push(params); return { insertId: 42 }; }],
+    [/SELECT id FROM annonce_participants/, () => []],
+    [/SELECT places_disponibles FROM announcements/, () => [{ places_disponibles: 10 }]],
+    [/INSERT INTO annonce_participants/, () => ({ insertId: 1 })],
+    [/UPDATE announcements SET places_disponibles/, () => ({ affectedRows: 1 })],
+    [/SELECT a\.\*/, () => [{ id: 42, visibility: 'public', sport_type: 'foot', city: 'Grenoble' }]],
+    [/SELECT ap\.\*|FROM annonce_participants ap/, () => []],
+  ]);
+  const { server, url } = await listen(makeApp(db));
+  try {
+    const res = await postJson(`${url}/api/announcements`, {
+      sport_type: 'foot',
+      places_total: 10,
+      public_place_ref: 12,
+      manual_city: 'Villeurbanne',      // saisie libre : ignorée au profit du référentiel
+      manual_date: '2030-01-15',
+      manual_start_time: '19:00',
+      manual_end_time: '20:30',
+    }, AUTH);
+    assert.equal(res.status, 201);
+
+    const params = inserts[0];
+    assert.ok(params.includes(12), 'public_place_ref stocké');
+    assert.ok(params.includes('Grenoble'), 'ville reprise du référentiel');
+    assert.ok(!params.includes('Villeurbanne'), 'la ville saisie librement est ignorée');
+    assert.ok(params.includes('2 rue des Alpes'), 'adresse reprise du référentiel');
+    // foot : 8 minimum sur 10 places (une partie à 10/10 ne se confirmerait jamais)
+    assert.ok(params.includes(8), 'min_participants par défaut = 8 pour un foot à 10');
+  } finally { server.close(); }
+});
+
+test('BK-ANN-20b terrain signalé inexistant -> refus ; aucun lieu -> refus', async () => {
+  let db = fakeDb([
+    [/FROM public_places WHERE id/, () => [{ id: 12, city: 'Grenoble', verification_status: 'reported_invalid' }]],
+  ]);
+  let { server, url } = await listen(makeApp(db));
+  try {
+    const res = await postJson(`${url}/api/announcements`, {
+      sport_type: 'basket', places_total: 6, public_place_ref: 12,
+      manual_date: '2030-01-15', manual_start_time: '19:00', manual_end_time: '20:30',
+    }, AUTH);
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).error, /signalé/);
+  } finally { server.close(); }
+
+  ({ server, url } = await listen(makeApp(fakeDb([]))));
+  try {
+    const res = await postJson(`${url}/api/announcements`, {
+      sport_type: 'basket', places_total: 6,
+      manual_date: '2030-01-15', manual_start_time: '19:00', manual_end_time: '20:30',
+    }, AUTH);
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).error, /Champs requis/);
+  } finally { server.close(); }
+});
+
+// ── BK-ANN-21 : filtres de liste (ville, dates, lieu) ──────────────────────
+test('BK-ANN-21 GET /announcements filtre ville + fenêtre de dates', async () => {
+  const db = fakeDb([[/FROM announcements a/, () => []]]);
+  const { server, url } = await listen(makeApp(db));
+  try {
+    const res = await fetch(`${url}/api/announcements?city=Grenoble&sport_type=foot&date_from=2030-01-01T00:00:00Z&date_to=2030-01-31T00:00:00Z`);
+    assert.equal(res.status, 200);
+    const { sql, params } = db.calls[0];
+    assert.match(sql, /LEFT JOIN public_places pp/);
+    assert.match(sql, /LOWER\(a\.city\) = LOWER\(\?\)/);
+    assert.match(sql, /a\.slot_start >= \?/);
+    assert.match(sql, /a\.slot_start <= \?/);
+    assert.match(sql, /pp\.verification_status <> 'reported_invalid'/);
+    assert.match(sql, /ORDER BY a\.slot_start ASC/);
+    assert.ok(params.includes('Grenoble'));
+  } finally { server.close(); }
+});
+
+// ── BK-ANN-22 : instrumentation des métriques ──────────────────────────────
+test('BK-ANN-22 join émet game_joined, puis game_filled au minimum atteint', async () => {
+  const events = [];
+  const mk = (placesDispo, min) => fakeDb([
+    [/SELECT id FROM annonce_participants WHERE annonce_id = \? AND user_id/, () => []],
+    [/SELECT places_disponibles FROM announcements/, () => [{ places_disponibles: placesDispo }]],
+    [/INSERT INTO annonce_participants/, () => ({ insertId: 1 })],
+    [/UPDATE announcements SET places_disponibles/, () => ({ affectedRows: 1 })],
+    [/DELETE FROM annonce_waitlist/, () => ({ affectedRows: 0 })],
+    [/SELECT created_by, city, sport_type/, () => [{
+      created_by: 42, city: 'Grenoble', sport_type: 'foot',
+      places_total: 10, places_disponibles: 10 - (10 - placesDispo + 1),
+      min_participants: 8, created_at: new Date(Date.now() - 5 * 3600 * 1000),
+    }]],
+    [/INSERT INTO notifications/, () => ({ insertId: 1 })],
+    [/SELECT user_id FROM annonce_waitlist/, () => []],
+    [/INSERT INTO analytics_events/, (params) => { events.push(params[0]); return { insertId: 1 }; }],
+  ]);
+
+  // 8e joueur sur 10 places -> minimum (8) atteint
+  let { server, url } = await listen(makeApp(mk(3, 8)));
+  try {
+    const res = await postJson(`${url}/api/announcements/5/join`, {}, AUTH);
+    assert.equal(res.status, 200);
+    await new Promise(r => setTimeout(r, 30));
+    assert.ok(events.includes('game_joined'), 'game_joined émis');
+    assert.ok(events.includes('game_filled'), 'game_filled émis au minimum atteint');
+  } finally { server.close(); }
+
+  // 5e joueur : encore sous le minimum
+  events.length = 0;
+  ({ server, url } = await listen(makeApp(mk(6, 8))));
+  try {
+    await postJson(`${url}/api/announcements/5/join`, {}, AUTH);
+    await new Promise(r => setTimeout(r, 30));
+    assert.ok(events.includes('game_joined'));
+    assert.ok(!events.includes('game_filled'), 'pas de game_filled sous le minimum');
   } finally { server.close(); }
 });

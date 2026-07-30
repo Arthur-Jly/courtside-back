@@ -41,6 +41,9 @@ function hashResetToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
+// Same hashing scheme as reset tokens (sha256 hex), reused for club invitations.
+const hashInviteToken = hashResetToken;
+
 module.exports = (db, jwtSecret) => {
   const router = express.Router();
 
@@ -99,6 +102,55 @@ module.exports = (db, jwtSecret) => {
 
     logger.info(`User login id=${user.id}`);
     res.json({ id: user.id, name: user.name, email: user.email, role: user.role, club_id: user.club_id, token });
+  }));
+
+  // Preview an invitation (used by the /rejoindre-club page to show the club name
+  // and pre-fill the email). Does not consume the token.
+  router.get('/club-invitation/:token', asyncHandler(async (req, res) => {
+    const token = String(req.params.token || '');
+    if (!/^[a-f0-9]{64}$/.test(token)) return res.status(400).json({ error: 'Jeton invalide' });
+    const row = await queryOne(db, `
+      SELECT ci.email, ci.club_id, c.name AS club_name
+      FROM club_invitations ci JOIN clubs c ON c.id = ci.club_id
+      WHERE ci.token_hash = ? AND ci.used_at IS NULL AND ci.expires_at > NOW() LIMIT 1`,
+      [hashInviteToken(token)]);
+    if (!row) throw new UnauthorizedError('Lien invalide ou expiré.');
+    res.json({ email: row.email, clubName: row.club_name });
+  }));
+
+  // Accept a club invitation: creates the gérant's account, linked to the club.
+  router.post('/accept-club-invitation', registerLimiter, validate(schemas.acceptClubInvitation), asyncHandler(async (req, res) => {
+    const { token, first_name, last_name, password, username } = req.body;
+
+    const invite = await queryOne(db, `
+      SELECT id, club_id, email FROM club_invitations
+      WHERE token_hash = ? AND used_at IS NULL AND expires_at > NOW() LIMIT 1`,
+      [hashInviteToken(token)]);
+    if (!invite) throw new UnauthorizedError('Lien invalide ou expiré. Demande une nouvelle invitation.');
+
+    const existing = await queryOne(db, 'SELECT id FROM users WHERE email = ?', [invite.email]);
+    if (existing) throw new ConflictError('Un compte existe déjà pour cet email. Connecte-toi puis contacte le support pour rattacher ton club.');
+
+    const existingUsername = await queryOne(db, 'SELECT id FROM users WHERE username = ?', [username]);
+    if (existingUsername) throw new ConflictError('Ce pseudo est déjà pris.');
+
+    const fullName = `${first_name.trim()} ${last_name.trim()}`;
+    const hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+    const userId = await insert(db,
+      'INSERT INTO users (name, email, password_hash, role, club_id, username, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())',
+      [fullName, invite.email, hash, 'club_admin', invite.club_id, username]);
+
+    // Consume the invitation (and any other outstanding one for this club).
+    await queryPromise(db, 'UPDATE club_invitations SET used_at = NOW() WHERE club_id = ? AND used_at IS NULL', [invite.club_id]);
+
+    const user = await queryOne(db, 'SELECT id, name, email, role, club_id, username FROM users WHERE id = ?', [userId]);
+    const authToken = jwt.sign(
+      { id: user.id, role: user.role, name: user.name, club_id: user.club_id },
+      jwtSecret,
+      { expiresIn: TOKEN_TTL }
+    );
+    logger.info(`Club admin account created via invitation id=${user.id} club=${user.club_id}`);
+    res.json({ ...user, first_name: first_name.trim(), last_name: last_name.trim(), token: authToken });
   }));
 
   // Validates the bearer token and returns fresh user data.

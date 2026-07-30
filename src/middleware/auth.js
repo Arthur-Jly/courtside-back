@@ -28,6 +28,14 @@ const requireClubAdmin = (req, res, next) => {
   next();
 };
 
+// Super-admin plateforme (Courtside Admin). Distinct de club_admin.
+const requireAdmin = (req, res, next) => {
+  if (req.user?.role !== 'admin') {
+    return next(new UnauthorizedError('Accès réservé à l\'administration plateforme'));
+  }
+  next();
+};
+
 // Verifies that the authenticated club_admin owns the :id (or alternate param name).
 // Uses req.user.club_id from JWT. For terrains, performs a DB lookup.
 function requireOwnClub(paramName = 'id') {
@@ -73,4 +81,4 @@ const optionalAuth = (req, res, next) => {
   next();
 };
 
-module.exports = { requireAuth, requireClubAdmin, requireOwnClub, requireOwnTerrain, optionalAuth };
+module.exports = { requireAuth, requireClubAdmin, requireAdmin, requireOwnClub, requireOwnTerrain, optionalAuth };

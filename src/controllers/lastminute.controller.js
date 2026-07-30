@@ -43,6 +43,7 @@ function toApiShape(row) {
     address: row.address || null,
     price: row.price_per_hour != null ? Number(row.price_per_hour) : null,
     date: dateStr,
+    startsAt: `${dateStr}T${row.start_time}`,
   };
 }
 

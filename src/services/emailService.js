@@ -113,6 +113,23 @@ async function sendReservationConfirmed(to, { courtName, date, slot, amount }) {
   return send(to, `Réservation confirmée — ${courtName || 'Courtside'}`, html);
 }
 
+async function sendClubInvitation(to, { inviteUrl, clubName }) {
+  const html = layout('Votre club est validé 🎉', `
+    <p style="font-size:14px;line-height:1.6;color:#364541;">
+      Bonne nouvelle : la demande d'ajout de <strong>${clubName || 'votre club'}</strong>
+      sur Courtside a été validée. Créez votre espace gérant pour piloter vos
+      terrains, votre planning et vos réservations.
+    </p>
+    ${button(inviteUrl, 'Créer mon espace club')}
+    <p style="font-size:13px;line-height:1.6;color:#6E7A77;">
+      Ce lien est valable <strong>7 jours</strong>. Il relie automatiquement votre
+      compte à ${clubName || 'votre club'}. Si vous n'êtes pas à l'origine de cette
+      demande, ignorez cet email.
+    </p>
+  `);
+  return send(to, `Votre espace club Courtside est prêt — ${clubName || 'Courtside'}`, html);
+}
+
 async function sendReservationReminder(to, { courtName, date, slot }) {
   const html = layout("C'est demain ! 🎾", `
     <p style="font-size:14px;line-height:1.6;color:#364541;">
@@ -131,5 +148,6 @@ async function sendReservationReminder(to, { courtName, date, slot }) {
 module.exports = {
   send, sendPasswordReset, sendWelcome,
   sendReservationConfirmed, sendReservationReminder,
+  sendClubInvitation,
   layout, button,
 };

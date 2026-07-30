@@ -113,6 +113,8 @@ const geocodingRouter = require('./routes/geocoding')(db);
 const reviewsRouter = require('./routes/reviews')(db);
 const financesRouter = require('./routes/finances')(db);
 const announcementsRouter = require('./routes/announcements')(db);
+const publicPlacesRouter = require('./routes/publicPlaces')(db);
+const pushRouter = require('./routes/push')(db);
 const notificationsRouter = require('./routes/notifications')(db);
 const realtimeRouter = require('./routes/realtime')();
 const newsletterRouter = require('./routes/newsletter')(db);
@@ -121,6 +123,9 @@ const paymentsRouter = paymentsModule(db);
 const CronService = require('./services/cronService');
 const cronService = new CronService(db);
 cronService.start();
+
+// Après cronService : la console admin expose la liste + le déclenchement manuel des tâches.
+const adminRouter = require('./routes/admin')(db, cronService);
 
 app.use('/api', usersRouter);
 app.use('/api', clubsRouter);
@@ -134,9 +139,12 @@ app.use('/api', geocodingRouter);
 app.use('/api', reviewsRouter);
 app.use('/api', financesRouter);
 app.use('/api', announcementsRouter);
+app.use('/api', publicPlacesRouter);
+app.use('/api', pushRouter);
 app.use('/api', notificationsRouter);
 app.use('/api', realtimeRouter);
 app.use('/api', newsletterRouter);
+app.use('/api', adminRouter);
 app.use('/api', paymentsRouter);
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Route not found' }));

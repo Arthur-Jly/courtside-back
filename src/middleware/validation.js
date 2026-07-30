@@ -51,6 +51,14 @@ const schemas = {
     password,
   }),
 
+  acceptClubInvitation: Joi.object({
+    token: Joi.string().hex().length(64).required(),
+    first_name: safeStr(2, 50).required(),
+    last_name: safeStr(2, 50).required(),
+    password,
+    username: Joi.string().alphanum().min(3).max(30).required(),
+  }),
+
   addFavorite: Joi.object({
     terrain_id: id.required(),
   }),
@@ -116,6 +124,49 @@ const schemas = {
     name: safeStr(2, 100).optional(),
     email: Joi.string().email().max(254).optional(),
   }).min(1),
+
+  // ── Terrains publics (phase 1) ───────────────────────────────────────────
+  publicPlaceQuery: Joi.object({
+    city: safeStr(1, 120).optional(),
+    sport: Joi.string().valid('foot', 'basket', 'hand', 'volley', 'ping', 'all').optional(),
+    q: safeStr(2, 120).optional(),
+    lat: Joi.number().min(-90).max(90).optional(),
+    lng: Joi.number().min(-180).max(180).optional(),
+    radius: Joi.number().min(0.5).max(100).optional(),
+    limit: Joi.number().integer().min(1).max(100).optional(),
+  }).and('lat', 'lng'),
+
+  publicPlaceReport: Joi.object({
+    kind: Joi.string().valid('inexistant', 'inaccessible', 'ferme', 'mauvais_etat', 'autre').required(),
+    comment: safeStr(1, 500).optional().allow(''),
+  }),
+
+  publicPlaceCreate: Joi.object({
+    name: safeStr(2, 200).required(),
+    equip_type: safeStr(2, 120).optional(),
+    sports: Joi.array().items(Joi.string().valid('foot', 'basket', 'hand', 'volley', 'ping')).min(1).max(5).required(),
+    address: safeStr(1, 255).optional().allow(''),
+    postal_code: safeStr(1, 10).optional().allow(''),
+    city: safeStr(1, 120).required(),
+    lat: Joi.number().min(-90).max(90).required(),
+    lng: Joi.number().min(-180).max(180).required(),
+    lighting: Joi.boolean().optional(),
+  }),
+
+  announcementListQuery: Joi.object({
+    sport_type: Joi.string().max(30).optional(),
+    status: Joi.string().max(30).optional(),
+    club_id: id.optional(),
+    user_id: id.optional(),
+    public_place_id: Joi.string().max(255).optional(),
+    public_place_ref: id.optional(),
+    city: safeStr(1, 120).optional(),
+    date_from: Joi.date().iso().optional(),
+    date_to: Joi.date().iso().optional(),
+    lat: Joi.number().min(-90).max(90).optional(),
+    lng: Joi.number().min(-180).max(180).optional(),
+    radius: Joi.number().min(0.5).max(200).optional(),
+  }).and('lat', 'lng'),
 };
 
 module.exports = { validate, schemas };

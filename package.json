@@ -9,6 +9,10 @@
     "test": "node --test test/*.test.js",
     "lint": "eslint .",
     "migrate": "node scripts/migrate.js",
+    "seed:admin": "node scripts/seed-admin.js",
+    "places:import": "node scripts/import-public-places.js",
+    "places:osm": "node scripts/crosscheck-osm.js",
+    "places:curate": "node scripts/curate-places.js",
     "schema:doc": "node scripts/schema-doc.js ../courtside-front/docs/SCHEMA.md",
     "schema:baseline": "node scripts/baseline-schema.js",
     "test:ci": "node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=junit.xml test/*.test.js",
@@ -32,7 +36,8 @@
     "mysql2": "^3.14.5",
     "node-cron": "^4.2.1",
     "nodemailer": "^9.0.3",
-    "stripe": "^20.0.0"
+    "stripe": "^20.0.0",
+    "web-push": "^3.6.7"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",

@@ -1,8 +1,10 @@
 const AnnouncementsController = require('../controllers/announcements.controller');
 const { requireAuth, optionalAuth } = require('../middleware/auth');
 const { asyncHandler, NotFoundError, ForbiddenError, ValidationError } = require('../middleware/errorHandler');
+const { validate, schemas } = require('../middleware/validation');
 const { queryOne, queryPromise, insert } = require('../utils/dbHelpers');
 const { notify } = require('../utils/notify');
+const { track } = require('../utils/track');
 const sseHub = require('../services/sseHub');
 const rateLimit = require('express-rate-limit');
 
@@ -13,10 +15,47 @@ const writeLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+const SPORT_LABELS = { foot: 'Foot', basket: 'Basket', hand: 'Hand', volley: 'Volley', ping: 'Ping-pong' };
+
+/**
+ * Prévient les joueurs de la même ville qui pratiquent ce sport.
+ *
+ * C'est le moteur du remplissage en phase 1 : une partie publiée pour le soir
+ * même n'a que quelques heures pour trouver ses joueurs. Le ciblage est
+ * volontairement étroit (ville × sport) — une notification hors sujet coûte un
+ * désabonnement, pas une inscription.
+ */
+async function notifyNearbyPlayers(db, announcement, organizerId) {
+  const city = announcement?.city;
+  const sport = announcement?.sport_type;
+  if (!city || !sport) return;
+
+  const rows = await queryPromise(db, `
+    SELECT u.id
+    FROM users u
+    JOIN user_profiles p ON p.user_id = u.id
+    WHERE u.id <> ?
+      AND LOWER(p.city) = LOWER(?)
+      AND (p.sports IS NULL OR JSON_LENGTH(p.sports) = 0 OR JSON_CONTAINS(p.sports, ?))
+    LIMIT 200
+  `, [organizerId, city, JSON.stringify(String(sport))]).catch(() => []);
+
+  const when = announcement.slot_start ? String(announcement.slot_start).slice(0, 16).replace('T', ' ') : '';
+  const summary = `${SPORT_LABELS[sport] || sport} ${when} · ${announcement.place_name || city}`;
+
+  for (const row of rows) {
+    notify(db, row.id, 'new_game_nearby', {
+      announcement_id: announcement.id,
+      city, sport, summary,
+    });
+  }
+}
+
 function classifyKnownError(err) {
   const m = String(err.message || '');
   if (m.includes('introuvable') || m.includes('traitee') || m.includes('traitée')) return new NotFoundError(err.message);
   if (m.includes('createur') || m.includes('créateur') || m.includes('privees') || m.includes('privées') || m.includes('Acces refuse') || m.includes('Accès refusé')) return new ForbiddenError(err.message);
+  if (m.includes('signale') || m.includes('signalé')) return new ValidationError(err.message);
   if (m.includes('Champs requis') || m.includes('Plus de places') || m.includes('deja') || m.includes('déjà') || m.includes('amis') || m.includes('Aucune donnee') || m.includes('Aucune donnée') || m.includes('validee') || m.includes('validée')) return new ValidationError(err.message);
   return err;
 }
@@ -26,14 +65,20 @@ module.exports = function (db) {
   const router = express.Router();
   const controller = new AnnouncementsController(db);
 
-  router.get('/announcements', asyncHandler(async (req, res) => {
-    const { sport_type, status, club_id, user_id, public_place_id } = req.query;
-    const normalizedStatus = status === 'open' ? 'active' : status;
-    const announcements = await controller.getPublicAnnouncements({
-      sport_type, status: normalizedStatus, club_id, user_id, public_place_id,
-    });
-    res.json({ announcements, count: announcements.length });
-  }));
+  router.get('/announcements',
+    validate(schemas.announcementListQuery, 'query'),
+    asyncHandler(async (req, res) => {
+      const {
+        sport_type, status, club_id, user_id, public_place_id,
+        public_place_ref, city, date_from, date_to,
+      } = req.query;
+      const normalizedStatus = status === 'open' ? 'active' : status;
+      const announcements = await controller.getPublicAnnouncements({
+        sport_type, status: normalizedStatus, club_id, user_id, public_place_id,
+        public_place_ref, city, date_from, date_to,
+      });
+      res.json({ announcements, count: announcements.length });
+    }));
 
   router.get('/announcements/last-minute', asyncHandler(async (req, res) => {
     const { sport_type, location, user_id, hours_until_expiration } = req.query;
@@ -71,6 +116,19 @@ module.exports = function (db) {
     const announcementData = { ...req.body, created_by: req.user.id };
     try {
       const announcement = await controller.createAnnouncement(announcementData);
+      // Mesure : parties publiées par jour × ville × sport (go/no-go phase 1).
+      track(db, 'game_published', {
+        userId: req.user.id,
+        announcementId: announcement?.id,
+        placeId: announcement?.public_place_ref,
+        city: announcement?.city,
+        sport: announcement?.sport_type,
+        payload: { places_total: announcement?.places_total, min_participants: announcement?.min_participants },
+      });
+      // Best-effort : la partie est créée quoi qu'il arrive côté diffusion.
+      if (announcement?.visibility !== 'private') {
+        notifyNearbyPlayers(db, announcement, req.user.id).catch(() => {});
+      }
       res.status(201).json({ success: true, announcement });
     } catch (err) {
       throw classifyKnownError(err);
@@ -93,6 +151,13 @@ module.exports = function (db) {
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
     try {
       const announcement = await controller.cancelAnnouncement(id, req.user.id);
+      track(db, 'game_cancelled', {
+        userId: req.user.id,
+        announcementId: id,
+        city: announcement?.city,
+        sport: announcement?.sport_type,
+        payload: { reason: 'organisateur' },
+      });
       res.json({ success: true, announcement });
     } catch (err) {
       throw classifyKnownError(err);
@@ -107,13 +172,29 @@ module.exports = function (db) {
       // Joining clears any waitlist entry of this user.
       queryPromise(db, 'DELETE FROM annonce_waitlist WHERE annonce_id = ? AND user_id = ?', [id, req.user.id]).catch(() => {});
       // Notify the organizer (unless they joined their own session).
-      const ann = await queryOne(db, 'SELECT created_by FROM announcements WHERE id = ?', [id]).catch(() => null);
+      const ann = await queryOne(db,
+        `SELECT created_by, city, sport_type, places_total, places_disponibles, min_participants, created_at
+         FROM announcements WHERE id = ?`, [id]).catch(() => null);
       if (ann && Number(ann.created_by) !== Number(req.user.id)) {
         notify(db, ann.created_by, 'session_join', {
           announcement_id: id,
           from_user_id: req.user.id,
           from_name: req.user.name || '',
         });
+      }
+      if (ann) {
+        const meta = { userId: req.user.id, announcementId: id, city: ann.city, sport: ann.sport_type };
+        track(db, 'game_joined', meta);
+        // `game_filled` = le minimum de joueurs est atteint : c'est ce qui donne
+        // le délai de remplissage, l'indicateur qui valide (ou non) la fenêtre.
+        const taken = Number(ann.places_total) - Number(ann.places_disponibles);
+        const min = Number(ann.min_participants) || 2;
+        if (taken === min) {
+          const hours = ann.created_at
+            ? Math.round((Date.now() - new Date(ann.created_at).getTime()) / 36e5)
+            : null;
+          track(db, 'game_filled', { ...meta, payload: { hours_to_fill: hours, players: taken } });
+        }
       }
       res.json({ success: true, participant: result });
     } catch (err) {
@@ -126,6 +207,9 @@ module.exports = function (db) {
     if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
     try {
       const result = await controller.removeParticipant(id, req.user.id);
+      queryOne(db, 'SELECT city, sport_type FROM announcements WHERE id = ?', [id])
+        .then(a => track(db, 'game_left', { userId: req.user.id, announcementId: id, city: a?.city, sport: a?.sport_type }))
+        .catch(() => {});
       // A spot just freed up: ping the first waitlisted user not yet notified.
       try {
         const next = await queryOne(db,

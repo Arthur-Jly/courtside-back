@@ -2,6 +2,22 @@
  * Contrôleur pour la gestion des annonces publiques et privées
  */
 const { logger } = require('../utils/logger');
+const { queryOne } = require('../utils/dbHelpers');
+const { track } = require('../utils/track');
+
+/**
+ * Minimum de joueurs par défaut, en proportion des places.
+ * Exiger 10/10 en foot ne confirmerait presque aucune partie ; 8 sur 10 suffit à
+ * jouer. Le basket 3x3 tourne à 4 sur 6. À réajuster avec le réel.
+ */
+const MIN_RATIO = { foot: 0.8, basket: 0.7 };
+const MIN_RATIO_DEFAULT = 0.5;
+
+function defaultMinParticipants(sportType, placesTotal) {
+  const ratio = MIN_RATIO[String(sportType || '').toLowerCase()] ?? MIN_RATIO_DEFAULT;
+  const computed = Math.round(Number(placesTotal) * ratio);
+  return Math.min(Math.max(computed, 2), Number(placesTotal));
+}
 
 class AnnouncementsController {
   constructor(db) {
@@ -18,19 +34,29 @@ class AnnouncementsController {
    * @returns {Promise<Array>} Liste des annonces filtrées
    */
   async getPublicAnnouncements(filters = {}) {
-    const { sport_type, status, club_id, user_id } = filters;
-    
+    const { sport_type, status, club_id, user_id, city, date_from, date_to, public_place_ref } = filters;
+
+    // Phase 1 : le lieu vient de `public_places`. On garde le club en repli pour
+    // les annonces héritées (créneau club). `a.*` contient désormais `a.city` :
+    // les colonnes de lieu sont donc aliasées explicitement, sinon la dernière
+    // colonne homonyme écraserait la précédente côté driver.
     let sql = `
       SELECT a.*,
              u.name AS creator_name,
              t.name AS terrain_name,
              c.name AS club_name,
              c.id AS club_id,
-             c.address, c.city,
-             COALESCE(a.lat, c.lat) AS lat,
-             COALESCE(a.lng, c.lon) AS lng
+             pp.id AS place_id,
+             pp.name AS place_name,
+             pp.equip_type AS place_type,
+             pp.verification_status AS place_status,
+             pp.lighting AS place_lighting,
+             COALESCE(pp.address, a.manual_address, c.address) AS address,
+             COALESCE(a.city, pp.city, a.manual_city, c.city) AS city,
+             COALESCE(a.lat, pp.lat, c.lat) AS lat,
+             COALESCE(a.lng, pp.lng, c.lon) AS lng
     `;
-    
+
     const params = [];
     
     // Si user_id est fourni, vérifier si l'utilisateur participe
@@ -47,6 +73,7 @@ class AnnouncementsController {
       LEFT JOIN users u ON a.created_by = u.id
       LEFT JOIN terrains t ON a.terrain_id = t.id
       LEFT JOIN clubs c ON t.club_id = c.id AND c.status = 'confirme'
+      LEFT JOIN public_places pp ON a.public_place_ref = pp.id
       WHERE (
         a.visibility = 'public'
         ${user_id ? `
@@ -83,6 +110,33 @@ class AnnouncementsController {
       params.push(sport_type.toLowerCase());
     }
 
+    // Filtrage par ville : c'est la granularité de la densité (ville × sport),
+    // donc de toutes les métriques du go/no-go. `a.city` fait foi, `pp.city` sert
+    // aux annonces créées avant la dénormalisation.
+    if (city) {
+      sql += ' AND (LOWER(a.city) = LOWER(?) OR LOWER(pp.city) = LOWER(?))';
+      params.push(String(city).trim(), String(city).trim());
+    }
+
+    // Filtrage par lieu public
+    if (public_place_ref) {
+      sql += ' AND a.public_place_ref = ?';
+      params.push(parseInt(public_place_ref, 10));
+    }
+
+    // Fenêtre de dates (sur le créneau, pas sur la création)
+    if (date_from) {
+      sql += ' AND a.slot_start >= ?';
+      params.push(String(date_from).slice(0, 19).replace('T', ' '));
+    }
+    if (date_to) {
+      sql += ' AND a.slot_start <= ?';
+      params.push(String(date_to).slice(0, 19).replace('T', ' '));
+    }
+
+    // Un lieu signalé comme inexistant ne doit plus porter de partie visible.
+    sql += " AND (pp.id IS NULL OR pp.verification_status <> 'reported_invalid')";
+
     // Filtrage par statut (par défaut, uniquement les annonces actives)
     if (status) {
       sql += ' AND a.status = ?';
@@ -92,7 +146,12 @@ class AnnouncementsController {
       params.push('active');
     }
 
-    sql += ' ORDER BY a.created_at DESC';
+    // Une session dont le créneau est déjà passé n'a plus sa place dans les annonces publiques
+    sql += ' AND a.slot_start >= NOW()';
+
+    // Chronologique : une liste de parties à venir se lit par créneau, pas par
+    // date de publication.
+    sql += ' ORDER BY a.slot_start ASC, a.created_at DESC';
 
     logger.debug('📝 SQL final:', sql);
     logger.debug('📝 Paramètres:', params);
@@ -143,16 +202,26 @@ class AnnouncementsController {
   async getAnnouncementById(id, userId = null) {
     return new Promise((resolve, reject) => {
       const sql = `
-        SELECT a.*, 
+        SELECT a.*,
                u.name AS creator_name,
                t.name AS terrain_name,
                t.sport_type AS terrain_sport,
                c.name AS club_name,
-               c.address, c.city, c.lat, c.lon
+               pp.id AS place_id,
+               pp.name AS place_name,
+               pp.equip_type AS place_type,
+               pp.verification_status AS place_status,
+               pp.lighting AS place_lighting,
+               pp.postal_code AS place_postal_code,
+               COALESCE(pp.address, a.manual_address, c.address) AS address,
+               COALESCE(a.city, pp.city, a.manual_city, c.city) AS city,
+               COALESCE(a.lat, pp.lat, c.lat) AS lat,
+               COALESCE(a.lng, pp.lng, c.lon) AS lng
         FROM announcements a
         LEFT JOIN users u ON a.created_by = u.id
         LEFT JOIN terrains t ON a.terrain_id = t.id
         LEFT JOIN clubs c ON t.club_id = c.id AND c.status = 'confirme'
+        LEFT JOIN public_places pp ON a.public_place_ref = pp.id
         WHERE a.id = ?
       `;
 
@@ -279,6 +348,8 @@ class AnnouncementsController {
       visibility = 'public',
       invited_users = [],
       public_place_id,
+      public_place_ref,
+      min_participants,
       manual_date,
       manual_start_time,
       manual_end_time,
@@ -309,7 +380,12 @@ class AnnouncementsController {
       if (!manual_date || !manual_start_time || !manual_end_time) {
         throw new Error('Date et horaires requis pour les lieux publics');
       }
-      
+      // Un lieu est obligatoire : soit une référence du référentiel, soit une
+      // adresse saisie. Sans lieu, la partie est injoignable.
+      if (!public_place_ref && !manual_address && !public_place_id) {
+        throw new Error('Champs requis manquants (public_place_ref ou manual_address)');
+      }
+
       return this._createPublicPlaceAnnouncement({
         sport_type,
         places_total,
@@ -318,6 +394,8 @@ class AnnouncementsController {
         visibility,
         invited_users,
         public_place_id,
+        public_place_ref,
+        min_participants,
         manual_date,
         manual_start_time,
         manual_end_time,
@@ -358,6 +436,8 @@ class AnnouncementsController {
       visibility,
       invited_users,
       public_place_id,
+      public_place_ref,
+      min_participants,
       manual_date,
       manual_start_time,
       manual_end_time,
@@ -369,6 +449,30 @@ class AnnouncementsController {
     } = data;
 
     logger.debug('🏞️ Création annonce LIEU PUBLIC');
+
+    // Le lieu du référentiel fait autorité : ville, adresse et coordonnées en
+    // sont recopiées. La ville saisie librement n'est jamais retenue quand un
+    // lieu structuré existe — toutes les métriques dépendent de ce champ.
+    let placeRef = null;
+    let place = null;
+    if (public_place_ref) {
+      place = await queryOne(this.db,
+        `SELECT id, name, address, city, lat, lng, verification_status
+         FROM public_places WHERE id = ?`, [public_place_ref]);
+      if (!place) throw new Error('Terrain introuvable');
+      if (place.verification_status === 'reported_invalid') {
+        throw new Error('Ce terrain a été signalé comme inexistant');
+      }
+      placeRef = place.id;
+    }
+
+    const finalAddress = place?.address ?? manual_address ?? null;
+    const finalCity = place?.city ?? manual_city ?? null;
+    const finalLat = place?.lat != null ? Number(place.lat) : (lat != null ? Number(lat) : null);
+    const finalLng = place?.lng != null ? Number(place.lng) : (lng != null ? Number(lng) : null);
+    const minParticipants = Number.isFinite(Number(min_participants)) && Number(min_participants) >= 2
+      ? Math.min(Number(min_participants), Number(places_total))
+      : defaultMinParticipants(sport_type, places_total);
 
     // Formater les dates/heures
     const slotStart = `${manual_date} ${manual_start_time}:00`;
@@ -399,8 +503,8 @@ class AnnouncementsController {
       // Créer l'annonce sans slot_id ni terrain_id
       const sql = `
         INSERT INTO announcements
-        (sport_type, slot_id, terrain_id, slot_start, slot_end, places_total, places_disponibles, description, created_by, visibility, status, public_place_id, expiration_date, auto_cancel, min_participants, manual_address, manual_city, lat, lng, created_at)
-        VALUES (?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, TRUE, 2, ?, ?, ?, ?, NOW())
+        (sport_type, slot_id, terrain_id, slot_start, slot_end, places_total, places_disponibles, description, created_by, visibility, status, public_place_id, public_place_ref, city, expiration_date, auto_cancel, min_participants, manual_address, manual_city, lat, lng, created_at)
+        VALUES (?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, TRUE, ?, ?, ?, ?, ?, NOW())
       `;
 
       const values = [
@@ -413,11 +517,14 @@ class AnnouncementsController {
         created_by,
         visibility,
         public_place_id || null,
+        placeRef,
+        finalCity,
         expirationStr,
-        manual_address || null,
-        manual_city || null,
-        lat != null ? Number(lat) : null,
-        lng != null ? Number(lng) : null,
+        minParticipants,
+        finalAddress,
+        finalCity,
+        finalLat,
+        finalLng,
       ];
 
       logger.debug('📝 Insertion annonce lieu public:', values);
@@ -1224,7 +1331,7 @@ class AnnouncementsController {
     return new Promise((resolve, reject) => {
       // Trouver les annonces expirées avec auto_cancel activé
       const sql = `
-        SELECT a.id, a.sport_type, a.places_total, a.places_disponibles, 
+        SELECT a.id, a.sport_type, a.city, a.places_total, a.places_disponibles,
                a.min_participants, a.slot_id,
                (SELECT COUNT(*) FROM annonce_participants WHERE annonce_id = a.id) as participant_count
         FROM announcements a
@@ -1273,6 +1380,15 @@ class AnnouncementsController {
                   );
                 });
               }
+
+              // Mesure : « parties annulées faute de joueurs », l'indicateur de
+              // frustration du modèle (alerte au-delà de 30 %).
+              track(this.db, 'game_expired', {
+                announcementId: id,
+                city: announcement.city,
+                sport: announcement.sport_type,
+                payload: { participants: participant_count, min_participants },
+              });
 
               cancelledAnnouncements.push(id);
             } catch (error) {

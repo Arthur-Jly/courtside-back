@@ -141,3 +141,75 @@ test('BK-AUTH-12 reset-password : token expiré/inconnu -> 401', async () => {
     assert.equal(res.status, 401);
   } finally { server.close(); }
 });
+
+// ── BK-AUTH-13 : invitation gérant de club ───────────────────────────────────
+test('BK-AUTH-13 GET /club-invitation/:token renvoie email + club, sans consommer', async () => {
+  const token = crypto.randomBytes(32).toString('hex');
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  const db = fakeDb([
+    [/FROM club_invitations ci JOIN clubs c/, (params) =>
+      (params[0] === tokenHash ? [{ email: 'g@club.fr', club_id: 9, club_name: 'Club Neuf' }] : [])],
+  ]);
+  const { server, url } = await listen(makeApp(db));
+  try {
+    const res = await fetch(`${url}/api/auth/club-invitation/${token}`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.email, 'g@club.fr');
+    assert.equal(body.clubName, 'Club Neuf');
+  } finally { server.close(); }
+});
+
+test('BK-AUTH-14 accept-club-invitation crée un club_admin lié au club + consomme le token', async () => {
+  const token = crypto.randomBytes(32).toString('hex');
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  let insertParams = null;
+  let consumed = false;
+  const db = fakeDb([
+    [/SELECT id, club_id, email FROM club_invitations/, (params) =>
+      (!consumed && params[0] === tokenHash ? [{ id: 3, club_id: 9, email: 'g@club.fr' }] : [])],
+    [/SELECT id FROM users WHERE email/, () => []],
+    [/SELECT id FROM users WHERE username/, () => []],
+    [/INSERT INTO users/, (params) => { insertParams = params; return { insertId: 50 }; }],
+    [/UPDATE club_invitations SET used_at/, () => { consumed = true; return { affectedRows: 1 }; }],
+    [/SELECT id, name, email, role, club_id, username FROM users WHERE id/,
+      () => [{ id: 50, name: 'Jean Gerant', email: 'g@club.fr', role: 'club_admin', club_id: 9, username: 'jean' }]],
+  ]);
+  const { server, url } = await listen(makeApp(db));
+  try {
+    let res = await postJson(`${url}/api/auth/accept-club-invitation`, {
+      token, first_name: 'Jean', last_name: 'Gerant', password: 'motdepasse1', username: 'jean',
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.role, 'club_admin');
+    assert.equal(body.club_id, 9, 'compte relié au club');
+    assert.ok(body.token, 'auto-login');
+    assert.equal(insertParams[3], 'club_admin', 'role inséré');
+    assert.equal(insertParams[4], 9, 'club_id inséré');
+    assert.equal(insertParams[1], 'g@club.fr', 'email pris depuis l\'invitation, pas la requête');
+
+    // rejeu du même token -> 401
+    res = await postJson(`${url}/api/auth/accept-club-invitation`, {
+      token, first_name: 'Jean', last_name: 'Gerant', password: 'motdepasse1', username: 'autre',
+    });
+    assert.equal(res.status, 401);
+  } finally { server.close(); }
+});
+
+test('BK-AUTH-15 accept-club-invitation refuse un email déjà utilisé -> 409', async () => {
+  const token = crypto.randomBytes(32).toString('hex');
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  const db = fakeDb([
+    [/SELECT id, club_id, email FROM club_invitations/, (params) =>
+      (params[0] === tokenHash ? [{ id: 3, club_id: 9, email: 'g@club.fr' }] : [])],
+    [/SELECT id FROM users WHERE email/, () => [{ id: 12 }]],
+  ]);
+  const { server, url } = await listen(makeApp(db));
+  try {
+    const res = await postJson(`${url}/api/auth/accept-club-invitation`, {
+      token, first_name: 'Jean', last_name: 'Gerant', password: 'motdepasse1', username: 'jean',
+    });
+    assert.equal(res.status, 409);
+  } finally { server.close(); }
+});

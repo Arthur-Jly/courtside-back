@@ -11,3 +11,6 @@ logs/
 .idea/
 .vscode/
 junit.xml
+
+# Exports de curation des terrains publics (données de travail, non versionnées)
+curation-*.csv

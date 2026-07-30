@@ -11,10 +11,12 @@ const q = (sql, p = []) => new Promise((res, rej) => c.query(sql, p, (e, r) => (
 
 const DOMAINS = [
   ['Utilisateurs & auth', ['users', 'user_profiles', 'password_resets', 'amis']],
-  ['Clubs & terrains', ['clubs', 'club_images', 'club_opening_hours', 'club_payment_methods', 'club_socials', 'club_sports', 'clubs_stats', 'terrains', 'terrain_images', 'recurring_availabilities', 'availability_exceptions']],
+  ['Clubs & terrains', ['clubs', 'club_images', 'club_invitations', 'club_opening_hours', 'club_payment_methods', 'club_socials', 'club_sports', 'clubs_stats', 'terrains', 'terrain_images', 'recurring_availabilities', 'availability_exceptions']],
+  ['Terrains publics (phase 1)', ['public_places', 'place_confirmations', 'place_reports']],
   ['Créneaux & réservations', ['slots', 'reservations', 'reservation_participants', 'reservation_share_payments', 'payments']],
   ['Sessions sociales (annonces)', ['announcements', 'annonce_participants', 'annonce_invitations', 'annonce_waitlist', 'player_ratings']],
   ['Messagerie', ['chats', 'chat_participants', 'messages']],
+  ['Mesure & notifications poussées', ['analytics_events', 'push_subscriptions']],
   ['Divers', ['events', 'event_images', 'reviews', 'favorites', 'notifications', 'last_minute_slots', 'newsletter_subscribers', 'schema_migrations']],
 ];
 
