@@ -5,6 +5,10 @@
  * consomme : { id, title, sport, time, location, address, terrainId, date }.
  */
 
+const { queryPromise } = require('../utils/dbHelpers');
+const { formatLocalYmd } = require('../utils/dates');
+const { NotFoundError } = require('../middleware/errorHandler');
+
 const LIST_SQL = `
   SELECT s.id, s.date, s.start_time, s.end_time,
          t.id AS terrain_id, t.sport_type, t.name AS terrain_name, t.price_per_hour,
@@ -22,15 +26,9 @@ function fmtHour(t) {
   return `${Number(h)}h${m === '00' ? '' : m}`;
 }
 
-// JAMAIS toISOString ici : une DATE MySQL arrive en minuit LOCAL, la convertir
-// en UTC recule d'un jour (TZ Europe/Paris) et "Aujourd'hui" devient "Demain".
-function localYmd(d) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
-
 function toApiShape(row) {
-  const today = localYmd(new Date());
-  const dateStr = row.date instanceof Date ? localYmd(row.date) : String(row.date).slice(0, 10);
+  const today = formatLocalYmd(new Date());
+  const dateStr = row.date instanceof Date ? formatLocalYmd(row.date) : String(row.date).slice(0, 10);
   const day = dateStr === today ? "Aujourd'hui" : 'Demain';
   const sport = String(row.sport_type || '').toLowerCase();
   return {
@@ -53,9 +51,7 @@ class LastMinuteController {
   }
 
   query(sql, params = []) {
-    return new Promise((resolve, reject) => {
-      this.db.query(sql, params, (err, rows) => (err ? reject(err) : resolve(rows)));
-    });
+    return queryPromise(this.db, sql, params);
   }
 
   /**
@@ -85,7 +81,7 @@ class LastMinuteController {
 
   async getSlotById(id) {
     const rows = await this.query(`${LIST_SQL} AND s.id = ?`, [id]);
-    if (rows.length === 0) throw new Error('Créneau introuvable');
+    if (rows.length === 0) throw new NotFoundError('Créneau introuvable');
     return toApiShape(rows[0]);
   }
 }

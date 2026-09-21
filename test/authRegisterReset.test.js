@@ -8,8 +8,12 @@ const jwt = require('jsonwebtoken');
 const JWT_SECRET = 'test-secret-test-secret-test-secret!';
 process.env.JWT_SECRET = JWT_SECRET;
 process.env.BCRYPT_ROUNDS = '4'; // tests only
+// Rate limits raised for tests — auth is under aggressive prod limits (5/hour).
+process.env.RATE_LIMIT_REGISTER = '100';
+process.env.RATE_LIMIT_LOGIN = '100';
+process.env.RATE_LIMIT_RESET = '100';
 
-const { fakeDb } = require('./helpers/fakeDb');
+const { fakeDb, dupEntry } = require('./helpers/fakeDb');
 const { listen, postJson } = require('./helpers/testServer');
 const authRouter = require('../src/routes/auth');
 const { errorHandler } = require('../src/middleware/errorHandler');
@@ -63,15 +67,12 @@ test('BK-AUTH-07 register refuse un email déjà utilisé -> 409', async () => {
 });
 
 // ── BK-AUTH-08 ───────────────────────────────────────────────────────────────
-test('BK-AUTH-08 register club_admin rattache le club existant', async () => {
-  let insertParams = null;
+test('BK-AUTH-08 register club_admin refusé : impossible de s\'auto-rattacher à un club', async () => {
   const db = fakeDb([
     [/SELECT id FROM users WHERE email/, () => []],
     [/SELECT id FROM users WHERE username/, () => []],
     [/SELECT id FROM clubs WHERE/, () => [{ id: 5 }]],
-    [/INSERT INTO users/, (params) => { insertParams = params; return { insertId: 32 }; }],
-    [/SELECT id, name, email, role, club_id, username FROM users WHERE id/,
-      () => [{ id: 32, name: 'Ad Min', email: 'admin@club.fr', role: 'club_admin', club_id: 5, username: 'adminclub' }]],
+    [/INSERT INTO users/, () => ({ insertId: 32 })],
   ]);
   const { server, url } = await listen(makeApp(db));
   try {
@@ -79,8 +80,40 @@ test('BK-AUTH-08 register club_admin rattache le club existant', async () => {
       ...REGISTER_BODY, email: 'admin@club.fr', username: 'adminclub',
       role: 'club_admin', club_name: 'Club Test',
     });
+    assert.equal(res.status, 403);
+    assert.ok(!db.calls.some(c => /INSERT INTO users/.test(c.sql)), 'aucun compte créé');
+    assert.ok(!db.calls.some(c => /FROM clubs/.test(c.sql)), 'le club n\'est même pas consulté');
+  } finally { server.close(); }
+});
+
+test('BK-AUTH-08b register : le rôle inséré est toujours player, sans club', async () => {
+  let insertParams = null;
+  const db = fakeDb([
+    [/SELECT id FROM users WHERE email/, () => []],
+    [/SELECT id FROM users WHERE username/, () => []],
+    [/INSERT INTO users/, (params) => { insertParams = params; return { insertId: 33 }; }],
+    [/SELECT id, name, email, role, club_id, username FROM users WHERE id/,
+      () => [{ id: 33, name: 'Léa Marchand', email: 'lea@example.com', role: 'player', club_id: null, username: 'lea123' }]],
+  ]);
+  const { server, url } = await listen(makeApp(db));
+  try {
+    const res = await postJson(`${url}/api/auth/register`, { ...REGISTER_BODY, club_name: 'Club Test' });
     assert.equal(res.status, 200);
-    assert.equal(insertParams[4], 5, 'club_id lié');
+    assert.equal(insertParams[3], 'player');
+    assert.equal(insertParams[4], null, 'club_id jamais renseigné à l\'inscription publique');
+  } finally { server.close(); }
+});
+
+test('BK-AUTH-08c register : deux inscriptions simultanées -> index unique, 409 (pas 500)', async () => {
+  const db = fakeDb([
+    [/SELECT id FROM users WHERE email/, () => []],
+    [/SELECT id FROM users WHERE username/, () => []],
+    [/INSERT INTO users/, () => { throw dupEntry(); }],
+  ]);
+  const { server, url } = await listen(makeApp(db));
+  try {
+    const res = await postJson(`${url}/api/auth/register`, REGISTER_BODY);
+    assert.equal(res.status, 409);
   } finally { server.close(); }
 });
 
@@ -140,6 +173,47 @@ test('BK-AUTH-12 reset-password : token expiré/inconnu -> 401', async () => {
       { token: 'a'.repeat(64), password: 'nouveaupass1' });
     assert.equal(res.status, 401);
   } finally { server.close(); }
+});
+
+test('BK-AUTH-12b reset-password : jeton déjà réservé par une requête concurrente -> 401, mot de passe inchangé', async () => {
+  const db = fakeDb([
+    [/SELECT id, user_id FROM password_resets WHERE token_hash/, () => [{ id: 7, user_id: 31 }]],
+    [/UPDATE password_resets SET used_at = NOW\(\) WHERE id = \? AND used_at IS NULL/, () => ({ affectedRows: 0 })],
+    [/UPDATE users SET password_hash/, () => ({ affectedRows: 1 })],
+  ]);
+  const { server, url } = await listen(makeApp(db));
+  try {
+    const res = await postJson(`${url}/api/auth/reset-password`, { token: 'a'.repeat(64), password: 'nouveaupass1' });
+    assert.equal(res.status, 401);
+    assert.ok(!db.calls.some(c => /UPDATE users SET password_hash/.test(c.sql)), 'mot de passe non modifié');
+  } finally { server.close(); }
+});
+
+test('BK-AUTH-12c reset-password révoque les sessions ouvertes du compte', async () => {
+  const tokenReset = crypto.randomBytes(32).toString('hex');
+  // user 77 : les tests précédents ont déjà révoqué le 31 (état du module en mémoire).
+  const oldSession = jwt.sign(
+    { id: 77, role: 'player', iat: Math.floor(Date.now() / 1000) - 60 },
+    JWT_SECRET, { expiresIn: '1h' }
+  );
+  const db = fakeDb([
+    [/SELECT id, user_id FROM password_resets WHERE token_hash/, () => [{ id: 7, user_id: 77 }]],
+    [/UPDATE password_resets SET used_at/, () => ({ affectedRows: 1 })],
+    [/UPDATE users SET password_hash/, () => ({ affectedRows: 1 })],
+    [/SELECT id, name, email, role, club_id, username FROM users WHERE id/,
+      () => [{ id: 77, name: 'Léa', email: 'lea@example.com', role: 'player', club_id: null, username: 'lea123' }]],
+  ]);
+  const { server, url } = await listen(makeApp(db));
+  try {
+    const before = await fetch(`${url}/api/auth/me`, { headers: { Authorization: `Bearer ${oldSession}` } });
+    assert.equal(before.status, 200, 'session valide avant le reset');
+
+    const reset = await postJson(`${url}/api/auth/reset-password`, { token: tokenReset, password: 'nouveaupass1' });
+    assert.equal(reset.status, 200);
+
+    const after = await fetch(`${url}/api/auth/me`, { headers: { Authorization: `Bearer ${oldSession}` } });
+    assert.equal(after.status, 401, 'ancienne session refusée après le reset');
+  } finally { server.close(); require('../src/services/tokenRevocation').reset(); }
 });
 
 // ── BK-AUTH-13 : invitation gérant de club ───────────────────────────────────

@@ -1,4 +1,5 @@
 const { logger } = require('./logger');
+const { queryPromise } = require('./dbHelpers');
 
 /**
  * Journalisation d'un événement produit (table `analytics_events`).
@@ -29,7 +30,8 @@ function track(db, type, { userId, announcementId, placeId, city, sport, payload
   const num = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : null);
   const str = (v, max) => (v == null ? null : String(v).slice(0, max));
 
-  db.query(
+  queryPromise(
+    db,
     `INSERT INTO analytics_events (type, user_id, announcement_id, place_id, city, sport, payload, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
     [
@@ -41,10 +43,7 @@ function track(db, type, { userId, announcementId, placeId, city, sport, payload
       str(sport, 30),
       payload ? JSON.stringify(payload).slice(0, 2000) : null,
     ],
-    (err) => {
-      if (err) logger.error(`track(${type}) failed: ${err.message}`);
-    },
-  );
+  ).catch((err) => logger.error(`track(${type}) failed: ${err.message}`));
 }
 
 module.exports = { track, TRACK_TYPES: TYPES };

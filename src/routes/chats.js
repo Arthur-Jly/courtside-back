@@ -2,12 +2,22 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const crypto = require('crypto');
+const rateLimit = require('express-rate-limit');
 const { requireAuth } = require('../middleware/auth');
-const { asyncHandler, ForbiddenError } = require('../middleware/errorHandler');
+const { asyncHandler, ForbiddenError, ValidationError } = require('../middleware/errorHandler');
 const { queryPromise, queryOne, insert } = require('../utils/dbHelpers');
 const sseHub = require('../services/sseHub');
 
-const { saveFile } = require('../services/storageService');
+const { saveFile, hasValidSignature } = require('../services/storageService');
+
+// Monté après requireAuth : la limite est par compte, pas par IP (NAT, mobile).
+const messageLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `user:${req.user.id}`,
+});
 
 const ALLOWED_MIME = new Set([
   'image/jpeg', 'image/png', 'image/gif', 'image/webp',
@@ -26,7 +36,7 @@ const upload = multer({
   fileFilter: (_req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
     if (!ALLOWED_MIME.has(file.mimetype) || !ALLOWED_EXT.has(ext)) {
-      return cb(new Error('Type de fichier non autorisé'));
+      return cb(new ValidationError('Type de fichier non autorisé'));
     }
     cb(null, true);
   },
@@ -211,6 +221,17 @@ module.exports = (db) => {
       return res.status(400).json({ error: 'Entre 1 et 30 membres requis' });
     }
 
+    // On n'ajoute pas n'importe qui à un groupe : seuls les amis acceptés (spam, harcèlement).
+    const friendRows = await queryPromise(db, `
+      SELECT CASE WHEN user_id_1 = ? THEN user_id_2 ELSE user_id_1 END AS friend_id
+      FROM amis
+      WHERE status = 'accepted' AND (user_id_1 = ? OR user_id_2 = ?)
+    `, [creatorId, creatorId, creatorId]);
+    const friendIds = new Set(friendRows.map(r => Number(r.friend_id)));
+    if (memberIds.some(id => !friendIds.has(id))) {
+      throw new ForbiddenError('Tu ne peux ajouter que tes amis à un groupe');
+    }
+
     const chatId = await insert(db,
       "INSERT INTO chats (type, name, status, created_at) VALUES ('group', ?, 'accepted', NOW())",
       [name]
@@ -240,7 +261,7 @@ module.exports = (db) => {
     res.json({ success: true });
   }));
 
-  router.post('/chats/:chat_id/messages', requireAuth, upload.single('file'), asyncHandler(async (req, res) => {
+  router.post('/chats/:chat_id/messages', requireAuth, messageLimiter, upload.single('file'), asyncHandler(async (req, res) => {
     const chatId = Number(req.params.chat_id);
     if (!Number.isFinite(chatId)) {
       return res.status(400).json({ error: 'chat_id invalide' });
@@ -253,6 +274,10 @@ module.exports = (db) => {
     const file_type = typeof req.body?.file_type === 'string' ? req.body.file_type.slice(0, 50) : null;
     let file_url = null;
     if (req.file) {
+      // Le type MIME vient du client : on contrôle la signature réelle du fichier.
+      if (!hasValidSignature(req.file.buffer, req.file.mimetype)) {
+        throw new ValidationError('Fichier invalide ou corrompu');
+      }
       file_url = await saveFile(req.file.buffer, 'chats', uploadFilename(req.file.originalname), req.file.mimetype);
     }
 

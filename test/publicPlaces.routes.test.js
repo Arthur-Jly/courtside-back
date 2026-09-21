@@ -15,6 +15,9 @@ const { listen, postJson } = require('./helpers/testServer');
 const publicPlacesRouter = require('../src/routes/publicPlaces');
 const { errorHandler } = require('../src/middleware/errorHandler');
 
+/** Dernier UPDATE public_places émis — c'est lui qui porte le changement de statut. */
+const lastUpdate = (db) => db.calls.filter(c => /UPDATE public_places/.test(c.sql)).at(-1).sql;
+
 const TOKEN = jwt.sign({ id: 7, role: 'player', name: 'Paul' }, process.env.JWT_SECRET, { expiresIn: '5m' });
 const AUTH = { Authorization: `Bearer ${TOKEN}` };
 
@@ -134,7 +137,6 @@ test('BK-PP-04 3e confirmation -> community_verified ; curation humaine préserv
     [/INSERT INTO analytics_events/, () => ({ insertId: 1 })],
   ]);
 
-  const lastUpdate = (db) => db.calls.filter(c => /UPDATE public_places/.test(c.sql)).at(-1).sql;
 
   let db = mk('auto', 3);
   let { server, url } = await listen(makeApp(db));
@@ -172,8 +174,6 @@ test('BK-PP-05 3 signalements « inexistant » -> reported_invalid', async () =>
     [/UPDATE public_places/, () => ({ affectedRows: 1 })],
     [/INSERT INTO analytics_events/, () => ({ insertId: 1 })],
   ]);
-
-  const lastUpdate = (db) => db.calls.filter(c => /UPDATE public_places/.test(c.sql)).at(-1).sql;
 
   let db = mk('auto', 3);
   let { server, url } = await listen(makeApp(db));

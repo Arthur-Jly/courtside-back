@@ -1,9 +1,10 @@
 const express = require('express');
-const { requireAuth } = require('../middleware/auth');
-const { asyncHandler, NotFoundError, ForbiddenError } = require('../middleware/errorHandler');
+const { requireAuth, optionalAuth } = require('../middleware/auth');
+const { asyncHandler, NotFoundError, ForbiddenError, ValidationError, ConflictError } = require('../middleware/errorHandler');
 const { queryPromise, queryOne, insert } = require('../utils/dbHelpers');
 const { validate, schemas } = require('../middleware/validation');
 const { notify } = require('../utils/notify');
+const { anonymizeAccount } = require('../services/accountService');
 
 module.exports = (db) => {
   const router = express.Router();
@@ -38,32 +39,10 @@ module.exports = (db) => {
     });
   }));
 
-  // RGPD account deletion: purge personal data, anonymize what must stay
-  // for other users' history (messages, past sessions).
+  // RGPD account deletion: cascade purge + anonymize residuals kept for
+  // other users' history (messages, past sessions, past reservations).
   router.delete('/users/me', requireAuth, asyncHandler(async (req, res) => {
-    const userId = req.user.id;
-
-    const purge = async (sql, params) => {
-      try { await queryPromise(db, sql, params); } catch { /* table/rows may not exist */ }
-    };
-
-    await purge('DELETE FROM favorites WHERE user_id = ?', [userId]);
-    await purge('DELETE FROM amis WHERE user_id_1 = ? OR user_id_2 = ?', [userId, userId]);
-    await purge('DELETE FROM annonce_invitations WHERE user_id = ? OR invited_by = ?', [userId, userId]);
-    await purge('DELETE FROM password_resets WHERE user_id = ?', [userId]);
-    await purge('DELETE FROM annonce_participants WHERE user_id = ?', [userId]);
-
-    // Anonymize the account: keeps FK integrity, kills login and PII.
-    await queryPromise(db, `
-      UPDATE users SET
-        name = 'Utilisateur supprimé',
-        email = CONCAT('deleted-', id, '@deleted.invalid'),
-        username = NULL,
-        password_hash = 'account-deleted',
-        avatar = NULL
-      WHERE id = ?
-    `, [userId]);
-
+    await anonymizeAccount(db, req.user.id);
     res.json({ success: true });
   }));
 
@@ -89,7 +68,7 @@ module.exports = (db) => {
 
   router.get('/favorites/:user_id', requireAuth, asyncHandler(async (req, res) => {
     const user_id = idParam(req, 'user_id');
-    if (user_id === null) return res.status(400).json({ error: 'user_id invalide' });
+    if (user_id === null) throw new ValidationError('user_id invalide');
     if (req.user.id !== user_id) throw new ForbiddenError();
     const clubs = await queryPromise(db, `
       SELECT c.id, c.name, c.address, c.city, c.lat, c.lon, c.rating,
@@ -111,7 +90,7 @@ module.exports = (db) => {
 
   router.get('/users/search', requireAuth, asyncHandler(async (req, res) => {
     const raw = String(req.query.query || req.query.q || '').trim();
-    if (raw.length < 2 || raw.length > 100) return res.status(400).json({ error: 'query invalide' });
+    if (raw.length < 2 || raw.length > 100) throw new ValidationError('query invalide');
     // Escape LIKE wildcards so user input cannot widen the match.
     const escaped = raw.replace(/[\\%_]/g, m => `\\${m}`);
     const currentUserId = req.user.id;
@@ -128,22 +107,26 @@ module.exports = (db) => {
     res.json(users);
   }));
 
-  router.get('/users/:id/profile', asyncHandler(async (req, res) => {
+  router.get('/users/:id/profile', optionalAuth, asyncHandler(async (req, res) => {
     const id = idParam(req);
-    if (id === null) return res.status(400).json({ error: 'id invalide' });
+    if (id === null) throw new ValidationError('id invalide');
     const user = await queryOne(db, 'SELECT id, name, username FROM users WHERE id = ?', [id]);
     if (!user) throw new NotFoundError('Utilisateur non trouvé');
     const profile = await queryOne(db, 'SELECT * FROM user_profiles WHERE user_id = ?', [id]);
+    const isPublic = Number(profile?.is_public) === 1;
+    const isSelf = Number(req.user?.id) === id;
+    // Un profil privé n'expose ni bio, ni ville, ni date de naissance à un tiers.
+    if (!profile || (!isPublic && !isSelf)) {
+      return res.json({ profile: { user_id: id, is_public: false, user_name: user.name, username: user.username } });
+    }
     res.json({
-      profile: profile
-        ? { ...profile, is_public: Number(profile.is_public) === 1, user_name: user.name, username: user.username }
-        : { user_id: id, is_public: false, user_name: user.name, username: user.username },
+      profile: { ...profile, is_public: isPublic, user_name: user.name, username: user.username },
     });
   }));
 
   router.put('/users/:id/profile', requireAuth, validate(schemas.profileUpdate), asyncHandler(async (req, res) => {
     const id = idParam(req);
-    if (id === null) return res.status(400).json({ error: 'id invalide' });
+    if (id === null) throw new ValidationError('id invalide');
     if (req.user.id !== id) throw new ForbiddenError();
     const { bio, city, birthdate, sports, is_public } = req.body;
     const sportsValue = Array.isArray(sports) ? sports.join(',') : (sports || null);
@@ -164,23 +147,29 @@ module.exports = (db) => {
 
   router.put('/users/:id', requireAuth, validate(schemas.userUpdate), asyncHandler(async (req, res) => {
     const id = idParam(req);
-    if (id === null) return res.status(400).json({ error: 'id invalide' });
+    if (id === null) throw new ValidationError('id invalide');
     if (req.user.id !== id) throw new ForbiddenError();
     const { name, email } = req.body;
     const updates = [];
     const vals = [];
     if (name) { updates.push('name = ?'); vals.push(name); }
     if (email) { updates.push('email = ?'); vals.push(email); }
-    if (updates.length === 0) return res.status(400).json({ error: 'Aucun champ à mettre à jour' });
+    if (updates.length === 0) throw new ValidationError('Aucun champ à mettre à jour');
     vals.push(id);
-    const result = await queryPromise(db, `UPDATE users SET ${updates.join(', ')} WHERE id = ?`, vals);
+    let result;
+    try {
+      result = await queryPromise(db, `UPDATE users SET ${updates.join(', ')} WHERE id = ?`, vals);
+    } catch (e) {
+      if (e.code === 'ER_DUP_ENTRY') throw new ConflictError('Cet email est déjà utilisé.');
+      throw e;
+    }
     if (result.affectedRows === 0) throw new NotFoundError('Utilisateur non trouvé');
     res.json({ success: true });
   }));
 
   router.get('/users/:id', asyncHandler(async (req, res) => {
     const id = idParam(req);
-    if (id === null) return res.status(400).json({ error: 'id invalide' });
+    if (id === null) throw new ValidationError('id invalide');
     const user = await queryOne(db,
       'SELECT id, name, role, created_at FROM users WHERE id = ?', [id]
     );
@@ -206,9 +195,7 @@ module.exports = (db) => {
   router.get('/friendship-status', requireAuth, asyncHandler(async (req, res) => {
     const u1 = Number(req.query.user_id_1);
     const u2 = Number(req.query.user_id_2);
-    if (!Number.isFinite(u1) || !Number.isFinite(u2)) {
-      return res.status(400).json({ error: 'user_id_1 and user_id_2 are required' });
-    }
+    if (!Number.isFinite(u1) || !Number.isFinite(u2)) throw new ValidationError('user_id_1 et user_id_2 requis');
     if (req.user.id !== u1 && req.user.id !== u2) throw new ForbiddenError();
     const row = await queryOne(db, `
       SELECT status FROM amis
@@ -220,25 +207,32 @@ module.exports = (db) => {
   router.post('/friend-request', requireAuth, asyncHandler(async (req, res) => {
     const userId1 = req.user.id;
     const userId2 = Number(req.body?.to_user_id ?? req.body?.user_id_2);
-    if (!Number.isFinite(userId2)) return res.status(400).json({ error: 'to_user_id required' });
-    if (userId1 === userId2) return res.status(400).json({ error: 'Cannot send friend request to yourself' });
+    if (!Number.isInteger(userId2) || userId2 <= 0) throw new ValidationError('to_user_id requis');
+    if (userId1 === userId2) throw new ValidationError('Impossible de s\'envoyer une demande à soi-même');
     const existing = await queryOne(db, `
       SELECT * FROM amis
       WHERE (user_id_1 = ? AND user_id_2 = ?) OR (user_id_1 = ? AND user_id_2 = ?)
     `, [userId1, userId2, userId2, userId1]);
-    if (existing) return res.status(400).json({ error: 'Relation already exists', status: existing.status });
-    await insert(db, "INSERT INTO amis (user_id_1, user_id_2, status) VALUES (?, ?, 'pending')", [userId1, userId2]);
+    if (existing) throw new ValidationError('Relation déjà existante');
+    try {
+      await insert(db, "INSERT INTO amis (user_id_1, user_id_2, status) VALUES (?, ?, 'pending')", [userId1, userId2]);
+    } catch (e) {
+      // Course entre deux demandes croisées : l'index unique sur la paire tranche.
+      if (e.code === 'ER_DUP_ENTRY') throw new ValidationError('Relation déjà existante');
+      if (e.code === 'ER_NO_REFERENCED_ROW_2') throw new NotFoundError('Utilisateur introuvable');
+      throw e;
+    }
     notify(db, userId2, 'friend_request', { from_user_id: userId1, from_name: req.user.name || '' });
     res.json({ success: true, status: 'pending' });
   }));
 
   router.put('/friend-request/:id', requireAuth, asyncHandler(async (req, res) => {
     const id = idParam(req);
-    if (id === null) return res.status(400).json({ error: 'id invalide' });
+    if (id === null) throw new ValidationError('id invalide');
     const { status } = req.body || {};
-    if (!['accepted', 'rejected'].includes(status)) return res.status(400).json({ error: 'Status must be accepted or rejected' });
+    if (!['accepted', 'rejected'].includes(status)) throw new ValidationError('Status doit être accepted ou rejected');
     const result = await queryPromise(db,
-      'UPDATE amis SET status = ? WHERE id = ? AND user_id_2 = ?',
+      "UPDATE amis SET status = ? WHERE id = ? AND user_id_2 = ? AND status = 'pending'",
       [status, id, req.user.id]
     );
     if (result.affectedRows === 0) throw new NotFoundError('Friend request not found');
@@ -251,7 +245,7 @@ module.exports = (db) => {
 
   router.delete('/friend-request/:id', requireAuth, asyncHandler(async (req, res) => {
     const id = idParam(req);
-    if (id === null) return res.status(400).json({ error: 'id invalide' });
+    if (id === null) throw new ValidationError('id invalide');
     const result = await queryPromise(db,
       'DELETE FROM amis WHERE id = ? AND user_id_1 = ? AND status = "pending"',
       [id, req.user.id]
@@ -262,7 +256,7 @@ module.exports = (db) => {
 
   router.get('/friend-requests/sent/:user_id', requireAuth, asyncHandler(async (req, res) => {
     const user_id = idParam(req, 'user_id');
-    if (user_id === null) return res.status(400).json({ error: 'user_id invalide' });
+    if (user_id === null) throw new ValidationError('user_id invalide');
     if (req.user.id !== user_id) throw new ForbiddenError();
     const requests = await queryPromise(db, `
       SELECT a.id, a.status, a.created_at, u.id as receiver_id, u.name as receiver_name
@@ -275,7 +269,7 @@ module.exports = (db) => {
 
   router.get('/friend-requests/:user_id', requireAuth, asyncHandler(async (req, res) => {
     const user_id = idParam(req, 'user_id');
-    if (user_id === null) return res.status(400).json({ error: 'user_id invalide' });
+    if (user_id === null) throw new ValidationError('user_id invalide');
     if (req.user.id !== user_id) throw new ForbiddenError();
     const requests = await queryPromise(db, `
       SELECT a.id, a.status, a.created_at, u.id as sender_id, u.name as sender_name
@@ -288,7 +282,7 @@ module.exports = (db) => {
 
   router.get('/friends/:user_id', requireAuth, asyncHandler(async (req, res) => {
     const user_id = idParam(req, 'user_id');
-    if (user_id === null) return res.status(400).json({ error: 'user_id invalide' });
+    if (user_id === null) throw new ValidationError('user_id invalide');
     if (req.user.id !== user_id) throw new ForbiddenError();
     const friends = await queryPromise(db, `
       SELECT u.id, u.name, a.created_at as friends_since
@@ -305,7 +299,7 @@ module.exports = (db) => {
   router.delete('/friends/:user_id/:friend_id', requireAuth, asyncHandler(async (req, res) => {
     const user_id = idParam(req, 'user_id');
     const friend_id = idParam(req, 'friend_id');
-    if (user_id === null || friend_id === null) return res.status(400).json({ error: 'id invalide' });
+    if (user_id === null || friend_id === null) throw new ValidationError('id invalide');
     if (req.user.id !== user_id && req.user.id !== friend_id) throw new ForbiddenError();
     const result = await queryPromise(db, `
       DELETE FROM amis

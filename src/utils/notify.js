@@ -1,6 +1,7 @@
 const { logger } = require('./logger');
 const sseHub = require('../services/sseHub');
 const { pushToUser } = require('./push');
+const { queryPromise } = require('./dbHelpers');
 
 /**
  * Fire-and-forget in-app notification.
@@ -12,19 +13,17 @@ const { pushToUser } = require('./push');
 function notify(db, userId, type, payload = {}) {
   const uid = Number(userId);
   if (!Number.isFinite(uid) || uid <= 0) return;
-  db.query(
+  queryPromise(
+    db,
     'INSERT INTO notifications (user_id, type, payload, created_at) VALUES (?, ?, ?, NOW())',
     [uid, String(type).slice(0, 40), JSON.stringify(payload).slice(0, 2000)],
-    (err) => {
-      if (err) {
-        logger.error(`notify(${type}) failed for user ${uid}: ${err.message}`);
-        return;
-      }
-      sseHub.push(uid, 'notification', { type, payload });
-      // Le SSE ne porte que les onglets ouverts : le push atteint l'appareil.
-      pushToUser(db, uid, type, payload);
-    }
-  );
+  ).then(() => {
+    sseHub.push(uid, 'notification', { type, payload });
+    // Le SSE ne porte que les onglets ouverts : le push atteint l'appareil.
+    pushToUser(db, uid, type, payload);
+  }).catch((err) => {
+    logger.error(`notify(${type}) failed for user ${uid}: ${err.message}`);
+  });
 }
 
 module.exports = { notify };

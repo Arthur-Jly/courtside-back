@@ -96,3 +96,21 @@ test('BK-SSE-02 stream accepte un JWT valide et ouvre un event-stream', async ()
     controller.abort(); // ferme la connexion SSE proprement
   } finally { server.close(); }
 });
+
+test('BK-SSE-03 stream accepte le JWT en Authorization: Bearer (sans token dans l\'URL)', async () => {
+  const { server, url } = await listen(makeApp(fakeDb([])));
+  try {
+    const token = jwt.sign({ id: 7, role: 'player' }, process.env.JWT_SECRET, { expiresIn: '5m' });
+    const controller = new AbortController();
+    const res = await fetch(`${url}/api/realtime/stream`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: controller.signal,
+    });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type') || '', /text\/event-stream/);
+    controller.abort();
+
+    const bad = await fetch(`${url}/api/realtime/stream`, { headers: { Authorization: 'Bearer forged.token.here' } });
+    assert.equal(bad.status, 401);
+  } finally { server.close(); }
+});

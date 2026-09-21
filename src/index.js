@@ -1,6 +1,7 @@
 require('dotenv').config();
 
 const express = require('express');
+const crypto = require('crypto');
 const mysql = require('mysql2');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -8,7 +9,8 @@ const hpp = require('hpp');
 const path = require('path');
 const rateLimit = require('express-rate-limit');
 const { httpLogger, logger } = require('./utils/logger');
-const { errorHandler } = require('./middleware/errorHandler');
+const { errorHandler, AppError } = require('./middleware/errorHandler');
+const config = require('./config');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const PORT = process.env.PORT || 3001;
@@ -33,11 +35,11 @@ const corsOptions = {
   origin: (origin, cb) => {
     if (!origin) return cb(null, true);
     if (corsAllowlist.includes('*')) {
-      if (NODE_ENV === 'production') return cb(new Error('CORS: wildcard origin disabled in production'));
+      if (NODE_ENV === 'production') return cb(new AppError('CORS: origine refusée', 403));
       return cb(null, true);
     }
     if (corsAllowlist.includes(origin)) return cb(null, true);
-    return cb(new Error(`CORS: origin ${origin} not allowed`));
+    return cb(new AppError('CORS: origine refusée', 403));
   },
   credentials: !corsAllowlist.includes('*'),
 };
@@ -74,6 +76,25 @@ db.getConnection((err, conn) => {
 const paymentsModule = require('./routes/payments');
 app.use('/api', paymentsModule.webhook(db));
 
+// Request correlation ID — attach req.id to every request for tracing.
+app.use((req, res, next) => {
+  const incoming = req.headers['x-request-id'];
+  // Repris tel quel dans les logs : on n'accepte qu'un jeu de caractères sûr.
+  req.id = (typeof incoming === 'string' && /^[A-Za-z0-9._-]{1,127}$/.test(incoming))
+    ? incoming
+    : crypto.randomUUID();
+  res.setHeader('X-Request-Id', req.id);
+  next();
+});
+
+// Global request timeout — closes hung connections.
+app.use((req, res, next) => {
+  req.setTimeout(config.http.requestTimeoutMs, () => {
+    if (!res.headersSent) res.status(503).json({ error: 'Requête expirée' });
+  });
+  next();
+});
+
 // Body parsers with hard limits
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false, limit: '1mb' }));
@@ -82,7 +103,7 @@ app.use(httpLogger);
 
 const globalLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 300,
+  max: config.http.globalLimit,
   standardHeaders: true,
   legacyHeaders: false,
 });

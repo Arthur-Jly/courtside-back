@@ -20,17 +20,10 @@ class Logger {
 
   _log(level, message, meta = {}) {
     const timestamp = new Date().toISOString();
-    const logEntry = {
-      timestamp,
-      level,
-      message,
-      ...meta
-    };
 
-    // En production, on pourrait envoyer à un service (Sentry, etc.)
-    if (!this.isDevelopment && level === LOG_LEVELS.ERROR) {
-      // TODO: Send to error tracking service
-    }
+    // En production, on pourrait envoyer à un service (Sentry, etc.) :
+    // l'entrée structurée à expédier est `{ timestamp, level, message, ...meta }`.
+    // Point d'accroche laissé volontairement vide tant qu'aucun DSN n'existe.
 
     // Console output avec couleurs
     const colors = {
@@ -71,13 +64,15 @@ class Logger {
   http(req, res, duration) {
     // Strip query string from logged URL — query params can carry tokens or PII.
     const urlPath = (req.originalUrl || req.url || '').split('?')[0];
-    const message = `${req.method} ${urlPath} - ${res.statusCode} - ${duration}ms`;
+    const rid = req.id ? ` [${req.id}]` : '';
+    const message = `${req.method} ${urlPath} - ${res.statusCode} - ${duration}ms${rid}`;
     this._log(LOG_LEVELS.HTTP, message, {
       method: req.method,
       url: urlPath,
       status: res.statusCode,
       duration,
       ip: req.ip,
+      requestId: req.id || null,
     });
   }
 }

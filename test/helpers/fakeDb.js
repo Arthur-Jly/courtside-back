@@ -4,6 +4,12 @@
  * - handler jette -> cb(err) (simule une erreur MySQL : e.errno/e.code respectés)
  * - db.calls = [{ sql, params }] pour asserter sur les requêtes émises
  * - supporte les signatures (sql, cb) et (sql, params, cb), + db.promise()
+ *
+ * Le callback est appelé **de façon synchrone**, pas via process.nextTick : les
+ * appelants passent tous par `queryPromise` (donc restent asynchrones), mais le
+ * double ne laisse aucune écriture en vol quand un fichier de test se termine.
+ * Avec un nextTick, `node --test` sous Windows plantait par intermittence sur
+ * « Unable to deserialize cloned data » — le flux du process enfant était tronqué.
  */
 function fakeDb(handlers) {
   const calls = [];
@@ -17,13 +23,13 @@ function fakeDb(handlers) {
           try {
             const out = respond(params, sql);
             // support [rows, fields] attendu par l'API promise de mysql2
-            return process.nextTick(() => cb(null, out));
+            return cb(null, out);
           } catch (e) {
-            return process.nextTick(() => cb(e));
+            return cb(e);
           }
         }
       }
-      process.nextTick(() => cb(new Error('Unexpected SQL in test: ' + String(sql).slice(0, 100))));
+      cb(new Error('Unexpected SQL in test: ' + String(sql).slice(0, 100)));
     },
     promise() {
       return {

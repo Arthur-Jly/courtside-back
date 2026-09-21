@@ -6,9 +6,11 @@ const fs = require('fs');
 const rateLimit = require('express-rate-limit');
 const ClubsController = require('../controllers/clubs.controller');
 const { requireAuth, requireClubAdmin, requireOwnClub, requireOwnTerrain } = require('../middleware/auth');
-const { asyncHandler, NotFoundError, ForbiddenError } = require('../middleware/errorHandler');
+const { asyncHandler, NotFoundError, ValidationError, ConflictError } = require('../middleware/errorHandler');
 const { validate, schemas } = require('../middleware/validation');
 const { logger } = require('../utils/logger');
+const { queryPromise } = require('../utils/dbHelpers');
+const { compressImage, hasValidSignature } = require('../services/storageService');
 
 const UPLOAD_DIR = path.join(__dirname, '../../uploads/terrains');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -29,7 +31,7 @@ const upload = multer({
   fileFilter: (_req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
     if (!ALLOWED_MIME.has(file.mimetype) || !ALLOWED_EXT.has(ext)) {
-      return cb(new Error('Type de fichier non autorisé'));
+      return cb(new ValidationError('Type de fichier non autorisé'));
     }
     cb(null, true);
   },
@@ -44,22 +46,16 @@ const publicClubCreateLimiter = rateLimit({
 
 const reqId = (req, name = 'id') => {
   const v = Number(req.params[name]);
-  if (!Number.isFinite(v)) {
-    const err = new Error(`${name} invalide`);
-    err.statusCode = 400;
-    err.isOperational = true;
-    throw err;
-  }
+  if (!Number.isFinite(v)) throw new ValidationError(`${name} invalide`);
   return v;
 };
 
 module.exports = (db) => {
   const router = express.Router();
   const controller = new ClubsController(db);
-  const pool = (db && typeof db.promise === 'function') ? db.promise() : db;
 
   router.get('/clubs/list/names', asyncHandler(async (_req, res) => {
-    const [rows] = await pool.query(
+    const rows = await queryPromise(db,
       "SELECT id, name, city FROM clubs WHERE status = 'confirme' ORDER BY name ASC"
     );
     res.json(rows);
@@ -67,18 +63,17 @@ module.exports = (db) => {
 
   // Batch availability: earliest free slot times per club for a day.
   // One query for the whole visible search list instead of N per-court calls.
-  router.post('/clubs/availability', asyncHandler(async (req, res) => {
-    const rawIds = Array.isArray(req.body?.club_ids) ? req.body.club_ids : [];
-    const ids = [...new Set(rawIds.map(Number).filter(n => Number.isFinite(n) && n > 0))].slice(0, 60);
+  router.post('/clubs/availability', validate(schemas.clubAvailability), asyncHandler(async (req, res) => {
+    const ids = [...new Set(req.body.club_ids.map(Number).filter(n => Number.isFinite(n) && n > 0))].slice(0, 60);
     if (ids.length === 0) return res.json({});
-    const date = /^\d{4}-\d{2}-\d{2}$/.test(req.body?.date) ? req.body.date : null;
+    const date = req.body.date || null;
 
     const placeholders = ids.map(() => '?').join(',');
     const params = [...ids];
     let dateCond = 's.date >= CURDATE()';
     if (date) { dateCond = 'DATE(s.date) = ?'; params.push(date); }
 
-    const [rows] = await pool.query(`
+    const rows = await queryPromise(db, `
       SELECT t.club_id AS club_id, TIME_FORMAT(s.start_time, '%H:%i') AS time
       FROM slots s
       JOIN terrains t ON t.id = s.terrain_id
@@ -97,7 +92,7 @@ module.exports = (db) => {
     res.json(out);
   }));
 
-  router.get('/clubs/stream', asyncHandler(async (req, res) => {
+  router.get('/clubs/stream', validate(schemas.clubListQuery, 'query'), asyncHandler(async (req, res) => {
     const { lat, lon, sport, sport_type, radius, limit, city } = req.query;
     const sportFilter = sport_type || sport;
 
@@ -118,7 +113,7 @@ module.exports = (db) => {
     }
   }));
 
-  router.get('/clubs', asyncHandler(async (req, res) => {
+  router.get('/clubs', validate(schemas.clubListQuery, 'query'), asyncHandler(async (req, res) => {
     const { lat, lon, sport, sport_type, radius, limit, city } = req.query;
     const clubs = await controller.getClubs({ lat, lon, sport: sport_type || sport, radius, limit, city });
     res.json(clubs);
@@ -133,15 +128,15 @@ module.exports = (db) => {
     const currentMonth = new Date().toISOString().slice(0, 7);
     const today = new Date().toISOString().slice(0, 10);
 
-    const [[statsRows], [todayRows], [occRows]] = await Promise.all([
-      pool.query(
+    const [statsRows, todayRows, occRows] = await Promise.all([
+      queryPromise(db,
         `SELECT COUNT(*) AS total_res, SUM(price) AS revenue, COUNT(DISTINCT user_id) AS unique_users
          FROM reservations r
          JOIN slots s ON s.reservation_id = r.id
          WHERE s.club_id = ? AND DATE_FORMAT(r.start_time, '%Y-%m') = ?`,
         [id, currentMonth]
       ),
-      pool.query(
+      queryPromise(db,
         `SELECT s.*, t.name AS terrain_name, u.name AS who
          FROM slots s
          JOIN terrains t ON s.terrain_id = t.id
@@ -151,7 +146,7 @@ module.exports = (db) => {
          ORDER BY s.start_time`,
         [id, today]
       ),
-      pool.query(
+      queryPromise(db,
         `SELECT COUNT(*) AS total_slots,
                 SUM(CASE WHEN status = 'booked' THEN 1 ELSE 0 END) AS booked_slots
          FROM slots WHERE club_id = ? AND DATE_FORMAT(date, '%Y-%m') = ?`,
@@ -205,13 +200,13 @@ module.exports = (db) => {
   router.post('/clubs/:id/sports', requireAuth, requireOwnClub('id'), asyncHandler(async (req, res) => {
     const { sportName } = req.body || {};
     if (typeof sportName !== 'string' || sportName.length < 1 || sportName.length > 50) {
-      return res.status(400).json({ error: 'sportName invalide' });
+      throw new ValidationError('sportName invalide');
     }
     try {
       const sport = await controller.addClubSport(reqId(req), sportName);
       res.status(201).json(sport);
     } catch (e) {
-      if (e.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Ce sport existe déjà pour ce club' });
+      if (e.code === 'ER_DUP_ENTRY') throw new ConflictError('Ce sport existe déjà pour ce club');
       throw e;
     }
   }));
@@ -221,36 +216,31 @@ module.exports = (db) => {
     res.status(204).send();
   }));
 
-  router.post('/clubs/:id/terrains', requireAuth, requireOwnClub('id'), asyncHandler(async (req, res) => {
-    const { name, sport_type, price_per_hour, slot_duration, recurring_availabilities } = req.body || {};
-    if (!name || !sport_type || price_per_hour == null || slot_duration == null) {
-      return res.status(400).json({ error: 'Tous les champs sont requis' });
-    }
+  router.post('/clubs/:id/terrains', requireAuth, requireOwnClub('id'), validate(schemas.terrainUpsert), asyncHandler(async (req, res) => {
+    const { name, sport_type, price_per_hour, slot_duration, recurring_availabilities } = req.body;
     const terrain = await controller.createTerrain({
       club_id: reqId(req),
-      name: String(name).slice(0, 100),
-      sport_type: String(sport_type).slice(0, 50),
-      price_per_hour: Number(price_per_hour),
-      slot_duration: parseInt(slot_duration, 10),
-      recurring_availabilities: Array.isArray(recurring_availabilities) ? recurring_availabilities : [],
+      name,
+      sport_type,
+      price_per_hour,
+      slot_duration,
+      recurring_availabilities: recurring_availabilities || [],
     });
     res.status(201).json(terrain);
   }));
 
   router.put('/clubs/:clubId/terrains/:terrainId',
     requireAuth, requireOwnClub('clubId'), requireOwnTerrain(db, 'terrainId'),
+    validate(schemas.terrainUpsert),
     asyncHandler(async (req, res) => {
       const terrainId = reqId(req, 'terrainId');
-      const { name, sport_type, price_per_hour, slot_duration, recurring_availabilities } = req.body || {};
-      if (!name || !sport_type || price_per_hour == null || slot_duration == null) {
-        return res.status(400).json({ error: 'Tous les champs sont requis' });
-      }
+      const { name, sport_type, price_per_hour, slot_duration, recurring_availabilities } = req.body;
       await controller.updateTerrain(terrainId, {
-        name: String(name).slice(0, 100),
-        sport_type: String(sport_type).slice(0, 50),
-        price_per_hour: Number(price_per_hour),
-        slot_duration: parseInt(slot_duration, 10),
-        recurring_availabilities: Array.isArray(recurring_availabilities) ? recurring_availabilities : [],
+        name,
+        sport_type,
+        price_per_hour,
+        slot_duration,
+        recurring_availabilities: recurring_availabilities || [],
       });
       res.status(200).json({ message: 'Terrain mis à jour avec succès' });
     }));
@@ -263,7 +253,7 @@ module.exports = (db) => {
     }));
 
   router.get('/db-status', requireAuth, requireClubAdmin, asyncHandler(async (_req, res) => {
-    await pool.query('SELECT 1 AS ok');
+    await queryPromise(db, 'SELECT 1 AS ok');
     res.json({ status: 'ok' });
   }));
 
@@ -277,7 +267,26 @@ module.exports = (db) => {
     asyncHandler(async (req, res) => {
       const terrainId = reqId(req, 'terrainId');
       if (!req.files || req.files.length === 0) {
-        return res.status(400).json({ error: 'Aucune image fournie' });
+        throw new ValidationError('Aucune image fournie');
+      }
+
+      // Recompression sur place : multer a déjà écrit le fichier, on le
+      // réécrit allégé sous le même nom (l'URL est déjà calculée dessus).
+      for (const file of req.files) {
+        const raw = await fs.promises.readFile(file.path);
+        // Le type MIME vient du client : on contrôle la signature réelle du fichier.
+        if (!hasValidSignature(raw, file.mimetype)) {
+          for (const f of req.files) {
+            try { fs.unlinkSync(f.path); } catch { /* déjà supprimé */ }
+          }
+          throw new ValidationError('Fichier image invalide');
+        }
+        try {
+          const small = await compressImage(raw, file.mimetype);
+          if (small.length < raw.length) await fs.promises.writeFile(file.path, small);
+        } catch (e) {
+          logger.warn(`Compression terrain image ignorée: ${e.message}`);
+        }
       }
 
       const existingImages = await controller.getTerrainImages(terrainId);
@@ -326,29 +335,28 @@ module.exports = (db) => {
     res.json(details);
   }));
 
-  router.put('/clubs/:id/info', requireAuth, requireOwnClub('id'), asyncHandler(async (req, res) => {
-    const { name, description, address, city, postal_code, phone, email, website } = req.body || {};
-    await controller.updateClubInfo(reqId(req), { name, description, address, city, postal_code, phone, email, website });
+  router.put('/clubs/:id/info', requireAuth, requireOwnClub('id'), validate(schemas.clubInfoUpdate), asyncHandler(async (req, res) => {
+    await controller.updateClubInfo(reqId(req), req.body);
     res.status(200).json({ message: 'Informations mises à jour avec succès' });
   }));
 
   router.put('/clubs/:id/opening-hours', requireAuth, requireOwnClub('id'), asyncHandler(async (req, res) => {
     const { hours } = req.body || {};
-    if (!Array.isArray(hours)) return res.status(400).json({ error: 'Le champ hours doit être un tableau' });
+    if (!Array.isArray(hours) || hours.length > 14) throw new ValidationError('Le champ hours doit être un tableau (14 entrées max)');
     await controller.updateClubOpeningHours(reqId(req), hours);
     res.status(200).json({ message: 'Horaires mis à jour avec succès' });
   }));
 
   router.put('/clubs/:id/socials', requireAuth, requireOwnClub('id'), asyncHandler(async (req, res) => {
     const { socials } = req.body || {};
-    if (!Array.isArray(socials)) return res.status(400).json({ error: 'Le champ socials doit être un tableau' });
+    if (!Array.isArray(socials) || socials.length > 20) throw new ValidationError('Le champ socials doit être un tableau (20 entrées max)');
     await controller.updateClubSocials(reqId(req), socials);
     res.status(200).json({ message: 'Réseaux sociaux mis à jour avec succès' });
   }));
 
   router.put('/clubs/:id/payment-methods', requireAuth, requireOwnClub('id'), asyncHandler(async (req, res) => {
     const { methods } = req.body || {};
-    if (!Array.isArray(methods)) return res.status(400).json({ error: 'Le champ methods doit être un tableau' });
+    if (!Array.isArray(methods) || methods.length > 20) throw new ValidationError('Le champ methods doit être un tableau (20 entrées max)');
     await controller.updateClubPaymentMethods(reqId(req), methods);
     res.status(200).json({ message: 'Moyens de paiement mis à jour avec succès' });
   }));

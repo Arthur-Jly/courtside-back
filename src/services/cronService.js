@@ -9,6 +9,9 @@
 const cron = require('node-cron');
 const AnnouncementsController = require('../controllers/announcements.controller');
 const emailService = require('./emailService');
+const { queryPromise } = require('../utils/dbHelpers');
+const { logger } = require('../utils/logger');
+const config = require('../config');
 
 class CronService {
   constructor(db) {
@@ -21,78 +24,69 @@ class CronService {
    * Démarre tous les cron jobs
    */
   start() {
-    console.log('🚀 Démarrage des tâches automatiques (cron jobs)...');
+    logger.info('Démarrage des tâches automatiques (cron jobs)...');
 
-    // Job 1: Vérifier les annonces expirées toutes les heures
-    const expirationCheckJob = cron.schedule('0 * * * *', async () => {
+    const expirationCheckJob = cron.schedule(config.cron.expirationCheckSchedule, async () => {
       try {
-        console.log('⏰ [CRON] Vérification des annonces expirées...');
         const result = await this.controller.checkAndCancelExpiredAnnouncements();
-        console.log(`✅ [CRON] Vérification terminée: ${result.cancelled} annoncées annulées, ${result.kept} conservées`);
+        logger.info(`[CRON expiration-check] ${result.cancelled} annulées, ${result.kept} conservées`);
       } catch (error) {
-        console.error('❌ [CRON] Erreur lors de la vérification des annonces expirées:', error);
+        logger.error(`[CRON expiration-check] ${error.message}`);
       }
     });
 
     this.jobs.push({
       name: 'expiration-check',
-      schedule: '0 * * * *', // Toutes les heures
+      schedule: config.cron.expirationCheckSchedule,
       description: 'Vérifie et annule les annonces expirées sans participants minimum',
-      job: expirationCheckJob
+      job: expirationCheckJob,
     });
 
-    // Job 2: Vérifier les annonces expirées toutes les 15 minutes (pour réactivité)
-    const quickCheckJob = cron.schedule('*/15 * * * *', async () => {
+    const quickCheckJob = cron.schedule(config.cron.quickExpirationSchedule, async () => {
       try {
-        console.log('⏰ [CRON-QUICK] Vérification rapide des annonces expirées...');
         const result = await this.controller.checkAndCancelExpiredAnnouncements();
         if (result.cancelled > 0) {
-          console.log(`✅ [CRON-QUICK] ${result.cancelled} annonces annulées`);
+          logger.info(`[CRON quick] ${result.cancelled} annonces annulées`);
         }
       } catch (error) {
-        console.error('❌ [CRON-QUICK] Erreur:', error);
+        logger.error(`[CRON quick] ${error.message}`);
       }
     });
 
     this.jobs.push({
       name: 'quick-expiration-check',
-      schedule: '*/15 * * * *', // Toutes les 15 minutes
+      schedule: config.cron.quickExpirationSchedule,
       description: 'Vérification rapide des annonces expirées',
-      job: quickCheckJob
+      job: quickCheckJob,
     });
 
-    // Job 3: Rappel J-1 des réservations, tous les jours à 09:00
-    const reminderJob = cron.schedule('0 9 * * *', () => this.sendReservationReminders());
-
+    const reminderJob = cron.schedule(config.cron.reminderSchedule, () => this.sendReservationReminders());
     this.jobs.push({
       name: 'reservation-reminders',
-      schedule: '0 9 * * *',
+      schedule: config.cron.reminderSchedule,
       description: 'Envoie le rappel email J-1 pour les réservations de demain',
-      job: reminderJob
+      job: reminderJob,
     });
 
-    // Job 4: Nettoyage quotidien de la base, tous les jours à 04:00
-    const cleanupJob = cron.schedule('0 4 * * *', () => this.cleanupDatabase());
-
+    const cleanupJob = cron.schedule(config.cron.cleanupSchedule, () => this.cleanupDatabase());
     this.jobs.push({
       name: 'db-cleanup',
-      schedule: '0 4 * * *',
+      schedule: config.cron.cleanupSchedule,
       description: 'Purge les créneaux libres passés et les tokens de reset expirés',
-      job: cleanupJob
+      job: cleanupJob,
     });
 
-    console.log(`✅ ${this.jobs.length} tâches automatiques démarrées:`);
+    logger.info(`${this.jobs.length} tâches automatiques démarrées`);
     this.jobs.forEach(({ name, schedule, description }) => {
-      console.log(`   - ${name} (${schedule}): ${description}`);
+      logger.debug(`  cron ${name} (${schedule}): ${description}`);
     });
   }
 
   /**
    * Rappel J-1 : réservations confirmées de demain, jamais rappelées.
    */
-  sendReservationReminders() {
-    return new Promise((resolve) => {
-      const sql = `
+  async sendReservationReminders() {
+    const sql = `
         SELECT r.id, r.start_time, r.end_time, u.email, u.name AS user_name,
                t.name AS terrain_name, c.name AS club_name
         FROM reservations r
@@ -105,32 +99,35 @@ class CronService {
           AND u.email NOT LIKE 'deleted-%@deleted.invalid'
         LIMIT 500
       `;
-      this.db.query(sql, [], async (err, rows) => {
-        if (err) {
-          console.error('❌ [CRON] Rappels J-1 — requête échouée:', err.message);
-          return resolve({ sent: 0 });
-        }
-        let sent = 0;
-        for (const r of rows || []) {
-          const start = new Date(r.start_time);
-          const end = new Date(r.end_time);
-          const pad = (n) => String(n).padStart(2, '0');
-          const slot = `${pad(start.getHours())}:${pad(start.getMinutes())} - ${pad(end.getHours())}:${pad(end.getMinutes())}`;
-          const dateStr = start.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
-          const courtName = [r.club_name, r.terrain_name].filter(Boolean).join(' · ') || 'ton terrain';
-          try {
-            await emailService.sendReservationReminder(r.email, { courtName, date: dateStr, slot });
-          } catch (e) {
-            console.error(`❌ [CRON] Rappel résa ${r.id} échoué:`, e.message);
-            continue;
-          }
-          this.db.query('UPDATE reservations SET reminder_sent_at = NOW() WHERE id = ?', [r.id], () => {});
-          sent++;
-        }
-        if (sent > 0) console.log(`✅ [CRON] ${sent} rappel(s) J-1 envoyé(s)`);
-        resolve({ sent });
-      });
-    });
+
+    let rows;
+    try {
+      rows = await queryPromise(this.db, sql, []);
+    } catch (err) {
+      logger.error(`[CRON] Rappels J-1 requête échouée: ${err.message}`);
+      return { sent: 0 };
+    }
+
+    let sent = 0;
+    for (const r of rows || []) {
+      const start = new Date(r.start_time);
+      const end = new Date(r.end_time);
+      const pad = (n) => String(n).padStart(2, '0');
+      const slot = `${pad(start.getHours())}:${pad(start.getMinutes())} - ${pad(end.getHours())}:${pad(end.getMinutes())}`;
+      const dateStr = start.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
+      const courtName = [r.club_name, r.terrain_name].filter(Boolean).join(' · ') || 'ton terrain';
+      try {
+        await emailService.sendReservationReminder(r.email, { courtName, date: dateStr, slot });
+      } catch (e) {
+        logger.error(`[CRON] Rappel résa ${r.id} échoué: ${e.message}`);
+        continue;
+      }
+      await queryPromise(this.db, 'UPDATE reservations SET reminder_sent_at = NOW() WHERE id = ?', [r.id])
+        .catch((e) => logger.error(`[CRON] Marquage rappel ${r.id} échoué: ${e.message}`));
+      sent++;
+    }
+    if (sent > 0) logger.info(`[CRON] ${sent} rappel(s) J-1 envoyé(s)`);
+    return { sent };
   }
 
   /**
@@ -139,16 +136,16 @@ class CronService {
    * et tokens de réinitialisation expirés depuis plus de 7 jours.
    */
   cleanupDatabase() {
-    const run = (sql, label) => new Promise((resolve) => {
-      this.db.query(sql, [], (err, result) => {
-        if (err) {
-          console.error(`❌ [CRON] Nettoyage ${label} échoué:`, err.message);
-          return resolve(0);
-        }
-        if (result.affectedRows > 0) console.log(`✅ [CRON] Nettoyage: ${result.affectedRows} ${label} supprimé(s)`);
-        resolve(result.affectedRows);
-      });
-    });
+    const run = async (sql, label) => {
+      try {
+        const result = await queryPromise(this.db, sql, []);
+        if (result.affectedRows > 0) logger.info(`[CRON] Nettoyage: ${result.affectedRows} ${label} supprimé(s)`);
+        return result.affectedRows;
+      } catch (err) {
+        logger.error(`[CRON] Nettoyage ${label} échoué: ${err.message}`);
+        return 0;
+      }
+    };
     return Promise.all([
       run("DELETE FROM slots WHERE status = 'free' AND date < CURDATE()", 'créneau(x) libre(s) passé(s)'),
       run('DELETE FROM password_resets WHERE expires_at < DATE_SUB(NOW(), INTERVAL 7 DAY)', 'token(s) de reset expiré(s)'),
@@ -159,10 +156,10 @@ class CronService {
    * Arrête tous les cron jobs
    */
   stop() {
-    console.log('⏸️ Arrêt des tâches automatiques...');
+    logger.info('Arrêt des tâches automatiques...');
     this.jobs.forEach(({ name, job }) => {
       job.stop();
-      console.log(`   - ${name} arrêté`);
+      logger.debug(`  cron ${name} arrêté`);
     });
   }
 

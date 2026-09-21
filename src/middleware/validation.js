@@ -71,9 +71,8 @@ const schemas = {
     to_user_id: id.required(),
   }),
 
-  bookSlot: Joi.object({
-    price: Joi.number().min(0).max(10000).optional(),
-  }),
+  // Le prix n'est jamais lu du client : il vient du tarif du terrain.
+  bookSlot: Joi.object({}),
 
   geocodeQuery: Joi.object({
     address: safeStr(3, 200).required(),
@@ -81,6 +80,70 @@ const schemas = {
 
   autocompleteQuery: Joi.object({
     input: safeStr(3, 200).required(),
+  }),
+
+  placeQuery: Joi.object({
+    placeId: safeStr(1, 255).required(),
+  }),
+
+  slotListQuery: Joi.object({
+    date: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    status: Joi.string().valid('free', 'booked', 'blocked', 'reserved_announcement', 'all').optional(),
+  }),
+
+  generateSlots: Joi.object({
+    days: Joi.number().integer().min(1).max(365).optional(),
+    weeks: Joi.number().integer().min(1).max(52).optional(),
+    fromDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    toDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  }),
+
+  generateSlotsForTerrain: Joi.object({
+    terrain_id: id.required(),
+    weeks: Joi.number().integer().min(1).max(52).optional(),
+    fromDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    toDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  }),
+
+  generateSlotsForClub: Joi.object({
+    club_id: id.required(),
+    weeks: Joi.number().integer().min(1).max(52).optional(),
+    fromDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    toDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  }),
+
+  cleanupSlots: Joi.object({
+    keepDays: Joi.number().integer().min(1).max(3650).optional(),
+  }),
+
+  blockSlot: Joi.object({
+    terrain_id: id.required(),
+    date: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).required(),
+    start_time: Joi.string().pattern(/^\d{2}:\d{2}(:\d{2})?$/).required(),
+    end_time: Joi.string().pattern(/^\d{2}:\d{2}(:\d{2})?$/).optional().allow(null, ''),
+  }),
+
+  clubAvailability: Joi.object({
+    club_ids: Joi.array().items(id).min(1).max(60).required(),
+    date: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  }),
+
+  clubListQuery: Joi.object({
+    lat: Joi.number().min(-90).max(90).optional(),
+    lon: Joi.number().min(-180).max(180).optional(),
+    lng: Joi.number().min(-180).max(180).optional(),
+    sport: Joi.string().max(50).optional(),
+    sport_type: Joi.string().max(50).optional(),
+    radius: Joi.number().min(0.5).max(500).optional(),
+    limit: Joi.number().integer().min(1).max(200).optional(),
+    city: safeStr(1, 120).optional(),
+  }),
+
+  metricsPhase1Query: Joi.object({
+    from: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    to: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    city: safeStr(1, 120).optional(),
+    days: Joi.number().integer().min(1).max(3650).optional(),
   }),
 
   reviewCreate: Joi.object({
@@ -122,7 +185,33 @@ const schemas = {
 
   userUpdate: Joi.object({
     name: safeStr(2, 100).optional(),
-    email: Joi.string().email().max(254).optional(),
+    // Minuscules : le login normalise l'email de la même façon, sinon le compte devient inaccessible.
+    email: Joi.string().email().max(254).lowercase().optional(),
+  }).min(1),
+
+  terrainUpsert: Joi.object({
+    name: safeStr(1, 100).required(),
+    sport_type: safeStr(1, 50).required(),
+    price_per_hour: Joi.number().min(0).max(10000).required(),
+    slot_duration: Joi.number().integer().min(10).max(480).required(),
+    recurring_availabilities: Joi.array().items(Joi.object({
+      day_of_week: Joi.number().integer().min(0).max(6).required(),
+      start_time: Joi.string().pattern(/^\d{2}:\d{2}(:\d{2})?$/).required(),
+      end_time: Joi.string().pattern(/^\d{2}:\d{2}(:\d{2})?$/).required(),
+      is_closed: Joi.alternatives(Joi.boolean(), Joi.number().valid(0, 1)).optional(),
+    })).max(50).optional(),
+  }),
+
+  clubInfoUpdate: Joi.object({
+    name: safeStr(2, 200).optional(),
+    description: Joi.string().max(2000).allow('', null).optional(),
+    address: Joi.string().max(300).allow('', null).optional(),
+    city: safeStr(1, 100).optional(),
+    postal_code: Joi.string().max(20).allow('', null).optional(),
+    phone: Joi.string().max(30).allow('', null).optional(),
+    email: Joi.string().email().max(254).allow('', null).optional(),
+    // Rendu en <a href> côté front : pas de schéma javascript:/data:.
+    website: Joi.string().max(300).pattern(/^\s*(javascript|data|vbscript):/i, { invert: true }).allow('', null).optional(),
   }).min(1),
 
   // ── Terrains publics (phase 1) ───────────────────────────────────────────

@@ -51,14 +51,12 @@ async function notifyNearbyPlayers(db, announcement, organizerId) {
   }
 }
 
-function classifyKnownError(err) {
-  const m = String(err.message || '');
-  if (m.includes('introuvable') || m.includes('traitee') || m.includes('traitée')) return new NotFoundError(err.message);
-  if (m.includes('createur') || m.includes('créateur') || m.includes('privees') || m.includes('privées') || m.includes('Acces refuse') || m.includes('Accès refusé')) return new ForbiddenError(err.message);
-  if (m.includes('signale') || m.includes('signalé')) return new ValidationError(err.message);
-  if (m.includes('Champs requis') || m.includes('Plus de places') || m.includes('deja') || m.includes('déjà') || m.includes('amis') || m.includes('Aucune donnee') || m.includes('Aucune donnée') || m.includes('validee') || m.includes('validée')) return new ValidationError(err.message);
-  return err;
-}
+// Controllers now throw typed AppError subclasses directly (NotFoundError,
+// ForbiddenError, ValidationError, ConflictError). This identity wrapper
+// stays as a call-site shim so the existing route try/catch blocks compile.
+// If it's an AppError we let it fly through; otherwise return as-is (the
+// central errorHandler maps unknown throws to 500 without leaking internals).
+function classifyKnownError(err) { return err; }
 
 module.exports = function (db) {
   const express = require('express');
@@ -66,26 +64,34 @@ module.exports = function (db) {
   const controller = new AnnouncementsController(db);
 
   router.get('/announcements',
+    optionalAuth,
     validate(schemas.announcementListQuery, 'query'),
     asyncHandler(async (req, res) => {
       const {
-        sport_type, status, club_id, user_id, public_place_id,
+        sport_type, status, club_id, public_place_id,
         public_place_ref, city, date_from, date_to,
       } = req.query;
       const normalizedStatus = status === 'open' ? 'active' : status;
+      // `user_id` déclenche l'inclusion des sessions PRIVÉES de cet utilisateur : il
+      // ne doit jamais venir de l'URL (n'importe qui lisait les sessions privées d'autrui).
       const announcements = await controller.getPublicAnnouncements({
-        sport_type, status: normalizedStatus, club_id, user_id, public_place_id,
+        sport_type, status: normalizedStatus, club_id, user_id: req.user?.id ?? null, public_place_id,
         public_place_ref, city, date_from, date_to,
       });
       res.json({ announcements, count: announcements.length });
     }));
 
-  router.get('/announcements/last-minute', asyncHandler(async (req, res) => {
-    const { sport_type, location, user_id, hours_until_expiration } = req.query;
+  router.get('/announcements/last-minute', optionalAuth, asyncHandler(async (req, res) => {
+    const { sport_type, hours_until_expiration } = req.query;
+    // `location` is a free-form LIKE — hard-cap length so callers can't force
+    // 10 KB LIKE scans across name/city/address/description.
+    const rawLocation = typeof req.query.location === 'string' ? req.query.location.slice(0, 100) : null;
+    // user_id used to come from the query string, which let anyone list the
+    // private last-minute sessions of another user. Trust only the JWT now.
     const announcements = await controller.getLastMinuteAnnouncements({
       sport_type,
-      location,
-      user_id: user_id ? parseInt(user_id, 10) : null,
+      location: rawLocation,
+      user_id: req.user?.id ?? null,
       hours_until_expiration: hours_until_expiration ? parseInt(hours_until_expiration, 10) : 48,
     });
     res.json({ announcements, count: announcements.length });
@@ -454,9 +460,14 @@ module.exports = function (db) {
     }
   }));
 
-  router.get('/users/:userId/announcements', asyncHandler(async (req, res) => {
+  router.get('/users/:userId/announcements', requireAuth, asyncHandler(async (req, res) => {
     const userId = Number(req.params.userId);
     if (!Number.isFinite(userId)) return res.status(400).json({ error: 'userId invalide' });
+    // Announcements can be private (invitees only); only the user themself or
+    // a platform admin may list somebody else's announcements.
+    if (req.user.id !== userId && req.user.role !== 'admin') {
+      throw new ForbiddenError();
+    }
     const announcements = await controller.getUserAnnouncements(userId);
     res.json({ announcements, count: announcements.length });
   }));
@@ -477,7 +488,8 @@ module.exports = function (db) {
     if (!sport_type) return res.status(400).json({ error: 'sport_type requis' });
     const slots = await controller.getAvailableSlots(
       sport_type, start_date,
-      days ? parseInt(days, 10) : 7,
+      // Borné : `days=100000` déclenchait une requête sur des années de créneaux.
+      Math.min(Math.max(parseInt(days, 10) || 7, 1), 60),
       club_id ? parseInt(club_id, 10) : null,
     );
     res.json({ slots, count: slots.length });

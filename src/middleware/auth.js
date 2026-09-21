@@ -1,11 +1,22 @@
 const jwt = require('jsonwebtoken');
 const { UnauthorizedError, AppError } = require('./errorHandler');
 const { queryOne } = require('../utils/dbHelpers');
+const { isRevoked } = require('../services/tokenRevocation');
 
 function getSecret() {
   const s = process.env.JWT_SECRET;
   if (!s || s.length < 32) throw new AppError('JWT secret not configured', 500, false);
   return s;
+}
+
+// Algorithme épinglé : jamais laisser le jeton choisir (alg=none, confusion HS/RS).
+const JWT_ALGORITHMS = ['HS256'];
+
+/** Vérifie signature, expiration et révocation. Jette si le jeton est inutilisable. */
+function verifyToken(token) {
+  const payload = jwt.verify(token, getSecret(), { algorithms: JWT_ALGORITHMS });
+  if (isRevoked(payload.id, payload.iat)) throw new Error('token revoked');
+  return payload;
 }
 
 const requireAuth = (req, res, next) => {
@@ -14,7 +25,7 @@ const requireAuth = (req, res, next) => {
     return next(new UnauthorizedError());
   }
   try {
-    req.user = jwt.verify(header.slice(7), getSecret());
+    req.user = verifyToken(header.slice(7));
     next();
   } catch {
     next(new UnauthorizedError('Token invalide ou expiré'));
@@ -73,7 +84,7 @@ const optionalAuth = (req, res, next) => {
   const header = req.headers.authorization;
   if (header && header.startsWith('Bearer ')) {
     try {
-      req.user = jwt.verify(header.slice(7), getSecret());
+      req.user = verifyToken(header.slice(7));
     } catch {
       // invalid token — proceed without user
     }
@@ -81,4 +92,7 @@ const optionalAuth = (req, res, next) => {
   next();
 };
 
-module.exports = { requireAuth, requireClubAdmin, requireAdmin, requireOwnClub, requireOwnTerrain, optionalAuth };
+module.exports = {
+  requireAuth, requireClubAdmin, requireAdmin, requireOwnClub, requireOwnTerrain, optionalAuth,
+  verifyToken, JWT_ALGORITHMS,
+};

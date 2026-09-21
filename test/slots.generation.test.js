@@ -12,7 +12,7 @@ const clubsRouter = require('../src/routes/clubs');
 const { errorHandler } = require('../src/middleware/errorHandler');
 
 const DAY = '2030-06-10';
-const DOW = new Date(DAY + 'T00:00:00Z').getDay();
+const DOW = new Date(DAY + 'T00:00:00Z').getUTCDay();
 
 // ── BK-CLUB-02 : génération de créneaux ─────────────────────────────────────
 test('BK-CLUB-02 génération : découpe la plage, saute les chevauchements, INSERT IGNORE', async () => {

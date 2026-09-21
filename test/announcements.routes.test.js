@@ -38,7 +38,7 @@ test('BK-ANN-09 POST /announcements sans auth -> 401 ; id non numérique -> 400'
 test('BK-ANN-10 join session pleine -> 400 ; waitlist alors possible -> 201', async () => {
   const db = fakeDb([
     [/SELECT id FROM annonce_participants WHERE annonce_id = \? AND user_id/, () => []],
-    [/SELECT places_disponibles FROM announcements/, () => [{ places_disponibles: 0 }]],
+    [/SELECT places_disponibles.*FROM announcements/, () => [{ places_disponibles: 0 }]],
     [/SELECT id, created_by, places_disponibles, status FROM announcements/,
       () => [{ id: 5, created_by: 42, places_disponibles: 0, status: 'active' }]],
     [/INSERT IGNORE INTO annonce_waitlist/, () => ({ affectedRows: 1 })],
@@ -77,9 +77,9 @@ test('BK-ANN-10b waitlist refusée si des places restent ou si organisateur', as
 test('BK-ANN-11 join réussi : purge waitlist du user + notif organisateur', async () => {
   const db = fakeDb([
     [/SELECT id FROM annonce_participants WHERE annonce_id = \? AND user_id/, () => []],
-    [/SELECT places_disponibles FROM announcements/, () => [{ places_disponibles: 2 }]],
+    [/SELECT places_disponibles.*FROM announcements/, () => [{ places_disponibles: 2 }]],
     [/INSERT INTO annonce_participants/, () => ({ insertId: 9 })],
-    [/UPDATE announcements SET places_disponibles = places_disponibles - 1/, () => ({})],
+    [/UPDATE announcements SET places_disponibles = places_disponibles - 1/, () => ({ affectedRows: 1 })],
     [/DELETE FROM annonce_waitlist/, () => ({})],
     [/SELECT created_by/, () => [{ created_by: 42, city: 'Grenoble', sport_type: 'foot', places_total: 10, places_disponibles: 8, min_participants: 8 }]],
     [/INSERT INTO notifications/, () => ({ insertId: 1 })],
@@ -234,9 +234,9 @@ test('BK-ANN-16 invitation accept : addParticipant + statut accepted', async () 
     [/SELECT \* FROM annonce_invitations WHERE id = \? AND user_id/,
       () => [{ id: 3, annonce_id: 5, user_id: 7, status: 'pending' }]],
     [/SELECT id FROM annonce_participants WHERE annonce_id = \? AND user_id/, () => []],
-    [/SELECT places_disponibles FROM announcements/, () => [{ places_disponibles: 1 }]],
+    [/SELECT places_disponibles.*FROM announcements/, () => [{ places_disponibles: 1 }]],
     [/INSERT INTO annonce_participants/, () => ({ insertId: 12 })],
-    [/UPDATE announcements SET places_disponibles = places_disponibles - 1/, () => ({})],
+    [/UPDATE announcements SET places_disponibles = places_disponibles - 1/, () => ({ affectedRows: 1 })],
     [/UPDATE annonce_invitations SET status/, (params) => { assert.equal(params[0], 'accepted'); return { affectedRows: 1 }; }],
   ]);
   const { server, url } = await listen(makeApp(db));
@@ -295,7 +295,7 @@ test('BK-ANN-20 création avec public_place_ref : ville et coordonnées viennent
     }]],
     [/INSERT INTO announcements/, (params) => { inserts.push(params); return { insertId: 42 }; }],
     [/SELECT id FROM annonce_participants/, () => []],
-    [/SELECT places_disponibles FROM announcements/, () => [{ places_disponibles: 10 }]],
+    [/SELECT places_disponibles.*FROM announcements/, () => [{ places_disponibles: 10 }]],
     [/INSERT INTO annonce_participants/, () => ({ insertId: 1 })],
     [/UPDATE announcements SET places_disponibles/, () => ({ affectedRows: 1 })],
     [/SELECT a\.\*/, () => [{ id: 42, visibility: 'public', sport_type: 'foot', city: 'Grenoble' }]],
@@ -370,9 +370,9 @@ test('BK-ANN-21 GET /announcements filtre ville + fenêtre de dates', async () =
 // ── BK-ANN-22 : instrumentation des métriques ──────────────────────────────
 test('BK-ANN-22 join émet game_joined, puis game_filled au minimum atteint', async () => {
   const events = [];
-  const mk = (placesDispo, min) => fakeDb([
+  const mk = (placesDispo, _min) => fakeDb([
     [/SELECT id FROM annonce_participants WHERE annonce_id = \? AND user_id/, () => []],
-    [/SELECT places_disponibles FROM announcements/, () => [{ places_disponibles: placesDispo }]],
+    [/SELECT places_disponibles.*FROM announcements/, () => [{ places_disponibles: placesDispo }]],
     [/INSERT INTO annonce_participants/, () => ({ insertId: 1 })],
     [/UPDATE announcements SET places_disponibles/, () => ({ affectedRows: 1 })],
     [/DELETE FROM annonce_waitlist/, () => ({ affectedRows: 0 })],

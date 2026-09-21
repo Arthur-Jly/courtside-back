@@ -1,5 +1,5 @@
 const express = require('express');
-const jwt = require('jsonwebtoken');
+const { verifyToken } = require('../middleware/auth');
 const sseHub = require('../services/sseHub');
 const { logger } = require('../utils/logger');
 
@@ -7,15 +7,21 @@ module.exports = () => {
   const router = express.Router();
 
   /**
-   * SSE stream. EventSource cannot send an Authorization header, so the
-   * JWT travels as a query param — standard for SSE; keep tokens short-lived
-   * and make sure access logs redact query strings in production.
+   * SSE stream. Le front lit le flux via fetch() et envoie `Authorization: Bearer`
+   * (le JWT ne transite donc jamais dans l'URL). `?token=` reste accepté en repli
+   * pour les clients EventSource, qui ne peuvent pas poser d'en-tête : il fuit dans
+   * les logs d'accès — à retirer quand plus aucun client ne l'utilise.
    */
+  function streamToken(req) {
+    const header = req.headers.authorization;
+    if (header && header.startsWith('Bearer ')) return header.slice(7);
+    return req.query.token;
+  }
+
   router.get('/realtime/stream', (req, res) => {
-    const token = req.query.token;
     let user;
     try {
-      user = jwt.verify(String(token || ''), process.env.JWT_SECRET);
+      user = verifyToken(String(streamToken(req) || ''));
     } catch {
       return res.status(401).json({ error: 'Token invalide' });
     }

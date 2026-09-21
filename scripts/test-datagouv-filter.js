@@ -48,7 +48,7 @@ console.log(`\n${passed}/${TESTS.length} tests passés${failed > 0 ? ` — ${fai
 
 // --- Test live API (optionnel, décommenter pour tester avec vraie API) ---
 
-async function testLiveApi() {
+async function _testLiveApi() {
   const { searchEquipements } = require('../src/services/datagouvApi');
 
   console.log('=== TEST API LIVE (Grenoble, tennis, 5km) ===\n');
@@ -66,4 +66,4 @@ async function testLiveApi() {
   });
 }
 
-// testLiveApi().catch(console.error);
+// _testLiveApi().catch(console.error);

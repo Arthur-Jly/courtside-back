@@ -7,6 +7,7 @@ const jwt = require('jsonwebtoken');
 const JWT_SECRET = 'test-secret-test-secret-test-secret!'; // >= 32 chars
 process.env.JWT_SECRET = JWT_SECRET;
 
+const { fakeDb } = require('./helpers/fakeDb');
 const authRouter = require('../src/routes/auth');
 const { errorHandler } = require('../src/middleware/errorHandler');
 
@@ -19,14 +20,11 @@ const USER_ROW = {
 };
 
 function makeApp(rows) {
-  const db = {
-    query(sql, params, cb) {
-      if (typeof params === 'function') { cb = params; params = []; }
-      if (/SELECT \* FROM users WHERE email/.test(sql)) return cb(null, rows);
-      if (/FROM users WHERE id/.test(sql)) return cb(null, rows);
-      return cb(null, []);
-    },
-  };
+  const db = fakeDb([
+    [/SELECT \* FROM users WHERE email/, () => rows],
+    [/FROM users WHERE id/, () => rows],
+    [/[\s\S]*/, () => []],
+  ]);
   const app = express();
   app.use(express.json());
   app.use('/api/auth', authRouter(db, JWT_SECRET));

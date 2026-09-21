@@ -2,27 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const AnnouncementsController = require('../src/controllers/announcements.controller');
 
-/**
- * Fake db : dispatch par motif SQL, dans l'ordre de déclaration.
- * handlers = [[regex, (params) => résultat], ...]
- */
-function fakeDb(handlers) {
-  const calls = [];
-  return {
-    calls,
-    query(sql, params, cb) {
-      if (typeof params === 'function') { cb = params; params = []; }
-      calls.push({ sql, params });
-      for (const [re, respond] of handlers) {
-        if (re.test(sql)) {
-          try { return cb(null, respond(params, sql)); }
-          catch (e) { return cb(e); }
-        }
-      }
-      cb(new Error('Unexpected SQL in test: ' + sql.slice(0, 80)));
-    },
-  };
-}
+const { fakeDb } = require('./helpers/fakeDb');
 
 // ── Régression du découpage (juillet 2026) : les méthodes du mixin
 //    announcementInvitations doivent rester sur le contrôleur. ─────────────
@@ -39,10 +19,50 @@ test('invitation mixin methods are present on the controller', () => {
 test('addParticipant rejects when the session is full (non-creator)', async () => {
   const db = fakeDb([
     [/SELECT id FROM annonce_participants/, () => []],
-    [/SELECT places_disponibles FROM announcements/, () => [{ places_disponibles: 0 }]],
+    [/SELECT places_disponibles.*FROM announcements/, () => [{ places_disponibles: 0 }]],
   ]);
   const c = new AnnouncementsController(db);
   await assert.rejects(c.addParticipant(1, 7), /Plus de places disponibles/);
+});
+
+test('addParticipant refuse une session annulée ou expirée', async () => {
+  for (const status of ['cancelled', 'expired']) {
+    const db = fakeDb([
+      [/SELECT id FROM annonce_participants/, () => []],
+      [/SELECT places_disponibles.*FROM announcements/, () => [{ places_disponibles: 3, status, visibility: 'public', created_by: 42 }]],
+    ]);
+    const c = new AnnouncementsController(db);
+    await assert.rejects(c.addParticipant(1, 7), /session est terminée/, status);
+  }
+});
+
+test('addParticipant : session privée sans invitation -> refusé (403), avec invitation -> accepté', async () => {
+  const mk = (invited) => fakeDb([
+    [/SELECT id FROM annonce_participants/, () => []],
+    [/SELECT places_disponibles.*FROM announcements/, () => [{ places_disponibles: 3, status: 'active', visibility: 'private', created_by: 42 }]],
+    [/SELECT id FROM annonce_invitations/, () => (invited ? [{ id: 9 }] : [])],
+    [/INSERT INTO annonce_participants/, () => ({ insertId: 60 })],
+    [/UPDATE announcements SET places_disponibles = places_disponibles - 1/, () => ({ affectedRows: 1 })],
+  ]);
+  await assert.rejects(new AnnouncementsController(mk(false)).addParticipant(1, 7), (e) => e.statusCode === 403);
+  const r = await new AnnouncementsController(mk(true)).addParticipant(1, 7);
+  assert.equal(r.id, 60);
+});
+
+test('addParticipant : dernière place prise entre-temps -> participant retiré, erreur 400', async () => {
+  const db = fakeDb([
+    [/SELECT id FROM annonce_participants/, () => []],
+    [/SELECT places_disponibles.*FROM announcements/, () => [{ places_disponibles: 1, status: 'active', visibility: 'public', created_by: 42 }]],
+    [/INSERT INTO annonce_participants/, () => ({ insertId: 61 })],
+    [/UPDATE announcements SET places_disponibles = places_disponibles - 1/, () => ({ affectedRows: 0 })],
+    [/DELETE FROM annonce_participants/, () => ({ affectedRows: 1 })],
+  ]);
+  await assert.rejects(new AnnouncementsController(db).addParticipant(1, 7), (e) => e.statusCode === 400);
+  const del = db.calls.find(q => /DELETE FROM annonce_participants/.test(q.sql));
+  assert.ok(del, 'participant annulé');
+  assert.deepEqual(del.params, [61]);
+  const decrement = db.calls.find(q => /places_disponibles - 1/.test(q.sql));
+  assert.match(decrement.sql, /places_disponibles > 0/, 'décrément conditionnel (atomique)');
 });
 
 test('addParticipant rejects a duplicate participant', async () => {
@@ -54,9 +74,9 @@ test('addParticipant rejects a duplicate participant', async () => {
 test('addParticipant inserts then decrements places_disponibles', async () => {
   const db = fakeDb([
     [/SELECT id FROM annonce_participants/, () => []],
-    [/SELECT places_disponibles FROM announcements/, () => [{ places_disponibles: 2 }]],
+    [/SELECT places_disponibles.*FROM announcements/, () => [{ places_disponibles: 2 }]],
     [/INSERT INTO annonce_participants/, () => ({ insertId: 55 })],
-    [/UPDATE announcements SET places_disponibles = places_disponibles - 1/, () => ({})],
+    [/UPDATE announcements SET places_disponibles = places_disponibles - 1/, () => ({ affectedRows: 1 })],
   ]);
   const c = new AnnouncementsController(db);
   const r = await c.addParticipant(1, 7);

@@ -3,19 +3,21 @@ const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
-const { queryOne, queryPromise, insert, getClubIdByName } = require('../utils/dbHelpers');
+const { queryOne, queryPromise, insert } = require('../utils/dbHelpers');
 const { validate, schemas } = require('../middleware/validation');
-const { asyncHandler, ConflictError, UnauthorizedError, NotFoundError } = require('../middleware/errorHandler');
+const { asyncHandler, ConflictError, UnauthorizedError, ForbiddenError } = require('../middleware/errorHandler');
 const { requireAuth } = require('../middleware/auth');
+const { revokeUser } = require('../services/tokenRevocation');
 const emailService = require('../services/emailService');
 const { logger } = require('../utils/logger');
+const config = require('../config');
 
 const TOKEN_TTL = process.env.JWT_TTL || '2h';
 const BCRYPT_ROUNDS = Number(process.env.BCRYPT_ROUNDS) || 12;
 
 const registerLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
-  max: 10,
+  max: config.http.registerLimit,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Trop de tentatives, réessayez plus tard.' },
@@ -23,7 +25,7 @@ const registerLimiter = rateLimit({
 
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 10,
+  max: config.http.loginLimit,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Trop de tentatives, réessayez plus tard.' },
@@ -31,7 +33,7 @@ const loginLimiter = rateLimit({
 
 const resetLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 5,
+  max: config.http.resetLimit,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Trop de tentatives, réessayez plus tard.' },
@@ -48,8 +50,17 @@ module.exports = (db, jwtSecret) => {
   const router = express.Router();
 
   router.post('/register', registerLimiter, validate(schemas.register), asyncHandler(async (req, res) => {
-    const { first_name, last_name, email, password, role, club_name, username } = req.body;
+    const { first_name, last_name, email, password, role, username } = req.body;
     const fullName = `${first_name.trim()} ${last_name.trim()}`;
+
+    // Un compte gérant donne la main sur un club : il ne s'obtient jamais en
+    // s'auto-déclarant (avant, `club_name` rattachait n'importe qui à un club
+    // existant). Il se crée via l'invitation envoyée à la validation du club.
+    if (role === 'club_admin') {
+      throw new ForbiddenError(
+        "Les comptes gérant sont créés via l'invitation envoyée après validation de la demande d'ajout de votre club."
+      );
+    }
 
     const existing = await queryOne(db, 'SELECT id FROM users WHERE email = ?', [email]);
     if (existing) throw new ConflictError('Cet email est déjà utilisé.');
@@ -59,23 +70,24 @@ module.exports = (db, jwtSecret) => {
 
     const hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
-    let club_id = null;
-    if (role === 'club_admin' && club_name) {
-      club_id = await getClubIdByName(db, club_name);
-      if (!club_id) throw new NotFoundError(`Le club "${club_name}" n'existe pas dans la base de données`);
+    let userId;
+    try {
+      userId = await insert(
+        db,
+        'INSERT INTO users (name, email, password_hash, role, club_id, username, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())',
+        [fullName, email, hash, 'player', null, username]
+      );
+    } catch (e) {
+      // Deux inscriptions simultanées passent les SELECT ci-dessus : l'index unique tranche.
+      if (e.code === 'ER_DUP_ENTRY') throw new ConflictError('Cet email ou ce pseudo est déjà utilisé.');
+      throw e;
     }
-
-    const userId = await insert(
-      db,
-      'INSERT INTO users (name, email, password_hash, role, club_id, username, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())',
-      [fullName, email, hash, role, club_id, username]
-    );
 
     const user = await queryOne(db, 'SELECT id, name, email, role, club_id, username FROM users WHERE id = ?', [userId]);
     const token = jwt.sign(
       { id: user.id, role: user.role, name: user.name, club_id: user.club_id },
       jwtSecret,
-      { expiresIn: TOKEN_TTL }
+      { algorithm: 'HS256', expiresIn: TOKEN_TTL }
     );
 
     logger.info(`User registered id=${user.id}`);
@@ -97,7 +109,7 @@ module.exports = (db, jwtSecret) => {
     const token = jwt.sign(
       { id: user.id, role: user.role, name: user.name, club_id: user.club_id },
       jwtSecret,
-      { expiresIn: TOKEN_TTL }
+      { algorithm: 'HS256', expiresIn: TOKEN_TTL }
     );
 
     logger.info(`User login id=${user.id}`);
@@ -136,18 +148,32 @@ module.exports = (db, jwtSecret) => {
 
     const fullName = `${first_name.trim()} ${last_name.trim()}`;
     const hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
-    const userId = await insert(db,
-      'INSERT INTO users (name, email, password_hash, role, club_id, username, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())',
-      [fullName, invite.email, hash, 'club_admin', invite.club_id, username]);
 
-    // Consume the invitation (and any other outstanding one for this club).
+    // Réservation atomique du jeton : deux requêtes simultanées avec le même lien
+    // passaient le SELECT et créaient deux comptes gérant.
+    const claim = await queryPromise(db, 'UPDATE club_invitations SET used_at = NOW() WHERE id = ? AND used_at IS NULL', [invite.id]);
+    if (!claim.affectedRows) throw new UnauthorizedError('Lien invalide ou expiré. Demande une nouvelle invitation.');
+
+    let userId;
+    try {
+      userId = await insert(db,
+        'INSERT INTO users (name, email, password_hash, role, club_id, username, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())',
+        [fullName, invite.email, hash, 'club_admin', invite.club_id, username]);
+    } catch (e) {
+      // Le compte n'a pas été créé : on rend le lien utilisable.
+      await queryPromise(db, 'UPDATE club_invitations SET used_at = NULL WHERE id = ?', [invite.id]).catch(() => {});
+      if (e.code === 'ER_DUP_ENTRY') throw new ConflictError('Cet email ou ce pseudo est déjà utilisé.');
+      throw e;
+    }
+
+    // Consume any other outstanding invitation for this club.
     await queryPromise(db, 'UPDATE club_invitations SET used_at = NOW() WHERE club_id = ? AND used_at IS NULL', [invite.club_id]);
 
     const user = await queryOne(db, 'SELECT id, name, email, role, club_id, username FROM users WHERE id = ?', [userId]);
     const authToken = jwt.sign(
       { id: user.id, role: user.role, name: user.name, club_id: user.club_id },
       jwtSecret,
-      { expiresIn: TOKEN_TTL }
+      { algorithm: 'HS256', expiresIn: TOKEN_TTL }
     );
     logger.info(`Club admin account created via invitation id=${user.id} club=${user.club_id}`);
     res.json({ ...user, first_name: first_name.trim(), last_name: last_name.trim(), token: authToken });
@@ -193,10 +219,16 @@ module.exports = (db, jwtSecret) => {
     if (!row) throw new UnauthorizedError('Lien invalide ou expiré. Refais une demande de réinitialisation.');
 
     const hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+
+    // Réservation atomique : un lien intercepté ne peut pas être rejoué en parallèle.
+    const claim = await queryPromise(db, 'UPDATE password_resets SET used_at = NOW() WHERE id = ? AND used_at IS NULL', [row.id]);
+    if (!claim.affectedRows) throw new UnauthorizedError('Lien invalide ou expiré. Refais une demande de réinitialisation.');
+
     await queryPromise(db, 'UPDATE users SET password_hash = ? WHERE id = ?', [hash, row.user_id]);
-    await queryPromise(db, 'UPDATE password_resets SET used_at = NOW() WHERE id = ?', [row.id]);
     // Invalidate any other outstanding links for this user.
     await queryPromise(db, 'UPDATE password_resets SET used_at = NOW() WHERE user_id = ? AND used_at IS NULL', [row.user_id]);
+    // Un reset sert souvent après une compromission : les sessions ouvertes tombent.
+    revokeUser(row.user_id);
 
     logger.info(`Password reset completed for user id=${row.user_id}`);
     res.json({ success: true });

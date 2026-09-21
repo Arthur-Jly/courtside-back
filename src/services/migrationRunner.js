@@ -16,15 +16,12 @@
 const fs = require('fs');
 const path = require('path');
 const { logger } = require('../utils/logger');
+const { queryPromise } = require('../utils/dbHelpers');
 
 const TOLERATED_ERRNOS = new Set([1050, 1060, 1061, 1091, 3821]);
 const MIGRATIONS_DIR = path.join(__dirname, '..', 'migrations');
 
-function query(db, sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.query(sql, params, (err, rows) => (err ? reject(err) : resolve(rows)));
-  });
-}
+const query = (db, sql, params = []) => queryPromise(db, sql, params);
 
 function splitStatements(sql) {
   // Strip full-line "--" comments first, otherwise a leading comment block

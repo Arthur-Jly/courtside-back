@@ -3,6 +3,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
 const { runMigrations, splitStatements } = require('../src/services/migrationRunner');
+const { fakeDb: makeFakeDb } = require('./helpers/fakeDb');
 
 // Régression du bug de juillet 2026 : un bloc de commentaires en tête de
 // fichier (sans point-virgule) se collait à la première instruction et le
@@ -47,16 +48,12 @@ test('fresh database is provisioned from baseline.sql and migrations are recorde
 
   const executed = [];
   const recorded = [];
-  const fakeDb = {
-    query(sql, params, cb) {
-      if (typeof params === 'function') { cb = params; params = []; }
-      if (/information_schema\.TABLES/.test(sql)) return cb(null, [{ n: 0 }]);
-      if (/^INSERT INTO schema_migrations/.test(sql)) { recorded.push(params[0]); return cb(null, {}); }
-      if (/^CREATE TABLE IF NOT EXISTS schema_migrations/.test(sql)) return cb(null, {});
-      executed.push(sql);
-      return cb(null, []);
-    },
-  };
+  const fakeDb = makeFakeDb([
+    [/information_schema\.TABLES/, () => [{ n: 0 }]],
+    [/^INSERT INTO schema_migrations/, (params) => { recorded.push(params[0]); return {}; }],
+    [/^CREATE TABLE IF NOT EXISTS schema_migrations/, () => ({})],
+    [/[\s\S]*/, (params, sql) => { executed.push(sql); return []; }],
+  ]);
 
   const ran = await runMigrations(fakeDb);
   assert.equal(ran, migrationFiles.length);
@@ -67,19 +64,14 @@ test('fresh database is provisioned from baseline.sql and migrations are recorde
 });
 
 test('existing database keeps the incremental path (nothing to apply)', async () => {
-  const fakeDb = {
-    query(sql, params, cb) {
-      if (typeof params === 'function') { cb = params; params = []; }
-      if (/information_schema\.TABLES/.test(sql)) return cb(null, [{ n: 36 }]);
-      if (/^SELECT filename FROM schema_migrations/.test(sql)) {
-        const files = fs.readdirSync(path.join(__dirname, '..', 'src', 'migrations'))
-          .filter(f => /^\d+_.+\.sql$/.test(f))
-          .map(f => ({ filename: f }));
-        return cb(null, files);
-      }
-      return cb(null, []);
-    },
-  };
+  const fakeDb = makeFakeDb([
+    [/information_schema\.TABLES/, () => [{ n: 36 }]],
+    [/^SELECT filename FROM schema_migrations/, () => fs
+      .readdirSync(path.join(__dirname, '..', 'src', 'migrations'))
+      .filter(f => /^\d+_.+\.sql$/.test(f))
+      .map(f => ({ filename: f }))],
+    [/[\s\S]*/, () => []],
+  ]);
   const ran = await runMigrations(fakeDb);
   assert.equal(ran, 0);
 });

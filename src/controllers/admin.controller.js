@@ -12,6 +12,8 @@ const crypto = require('crypto');
 const { queryPromise, queryOne } = require('../utils/dbHelpers');
 const emailService = require('../services/emailService');
 const { logger } = require('../utils/logger');
+const { anonymizeAccount } = require('../services/accountService');
+const { revokeUser } = require('../services/tokenRevocation');
 
 const INVITE_TTL_DAYS = 7;
 
@@ -483,6 +485,8 @@ class AdminController {
     } else {
       await queryPromise(this.db, 'UPDATE users SET role = ?, club_id = NULL WHERE id = ?', [role, id]);
     }
+    // Le rôle et le club vivent dans le JWT : sans révocation, l'ancien rôle reste actif jusqu'à expiration.
+    revokeUser(id);
     return { user: await this.getUserDetail(id) };
   }
 
@@ -510,17 +514,7 @@ class AdminController {
     if (!user) return { notFound: true };
     if (user.role === 'admin') return { forbidden: true }; // on ne supprime pas un admin par erreur
 
-    const purge = async (sql, params) => { try { await queryPromise(this.db, sql, params); } catch { /* noop */ } };
-    await purge('DELETE FROM favorites WHERE user_id = ?', [id]);
-    await purge('DELETE FROM amis WHERE user_id_1 = ? OR user_id_2 = ?', [id, id]);
-    await purge('DELETE FROM annonce_invitations WHERE user_id = ? OR invited_by = ?', [id, id]);
-    await purge('DELETE FROM password_resets WHERE user_id = ?', [id]);
-    await purge('DELETE FROM annonce_participants WHERE user_id = ?', [id]);
-    await queryPromise(this.db, `
-      UPDATE users SET name = 'Utilisateur supprimé',
-        email = CONCAT('deleted-', id, '@deleted.invalid'),
-        username = NULL, password_hash = 'account-deleted', avatar = NULL, club_id = NULL
-      WHERE id = ?`, [id]);
+    await anonymizeAccount(this.db, id);
     return { deleted: true };
   }
 

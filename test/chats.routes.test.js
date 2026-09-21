@@ -172,6 +172,7 @@ test('BK-CHAT-06 accept : passe pending -> accepted, participants seulement', as
 test('BK-CHAT-07 création groupe : créateur admin, membres dédupliqués, bornes', async () => {
   let participantsParams = null;
   const db = fakeDb([
+    [/FROM amis\s+WHERE status = 'accepted'/, () => [{ friend_id: 55 }, { friend_id: 56 }]],
     [/INSERT INTO chats/, () => ({ insertId: 90 })],
     [/INSERT INTO chat_participants/, (params) => { participantsParams = params; return {}; }],
     [/SELECT \* FROM chats WHERE id/, () => [{ id: 90, type: 'group', name: 'La team' }]],
@@ -189,5 +190,19 @@ test('BK-CHAT-07 création groupe : créateur admin, membres dédupliqués, born
     assert.equal(res.status, 400);
     res = await postJson(`${url}/api/chats/group`, { name: 'X', member_ids: [] }, AUTH);
     assert.equal(res.status, 400);
+  } finally { server.close(); }
+});
+
+test('BK-CHAT-07b groupe : impossible d\'ajouter quelqu\'un qui n\'est pas ami -> 403, rien créé', async () => {
+  const db = fakeDb([
+    [/FROM amis\s+WHERE status = 'accepted'/, () => [{ friend_id: 55 }]],
+    [/INSERT INTO chats/, () => ({ insertId: 91 })],
+    [/INSERT INTO chat_participants/, () => ({})],
+  ]);
+  const { server, url } = await listen(makeApp(db));
+  try {
+    const res = await postJson(`${url}/api/chats/group`, { name: 'Spam', member_ids: [55, 999] }, AUTH);
+    assert.equal(res.status, 403);
+    assert.ok(!db.calls.some(c => /INSERT INTO chats/.test(c.sql)), 'aucun groupe créé');
   } finally { server.close(); }
 });

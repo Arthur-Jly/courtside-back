@@ -17,6 +17,26 @@ const writeLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// Le serveur POST vers l'endpoint stocké : sans liste blanche, un abonnement
+// forgé (https://réseau-interne/…) faisait émettre des requêtes par le serveur (SSRF).
+const PUSH_SERVICE_HOSTS = [
+  /^fcm\.googleapis\.com$/,
+  /^updates\.push\.services\.mozilla\.com$/,
+  /^updates-autopush(\.stage)?\.(prod|stage)\.mozaws\.net$/,
+  /(^|\.)notify\.windows\.com$/,
+  /(^|\.)push\.apple\.com$/,
+];
+
+function isKnownPushService(endpoint) {
+  try {
+    const url = new URL(endpoint);
+    return url.protocol === 'https:' && !url.username && !url.password && !url.port
+      && PUSH_SERVICE_HOSTS.some((re) => re.test(url.hostname));
+  } catch {
+    return false;
+  }
+}
+
 module.exports = (db) => {
   const router = express.Router();
 
@@ -26,7 +46,7 @@ module.exports = (db) => {
 
   router.post('/push/subscribe', requireAuth, writeLimiter, asyncHandler(async (req, res) => {
     const { endpoint, keys } = req.body || {};
-    if (typeof endpoint !== 'string' || !/^https:\/\//.test(endpoint) || endpoint.length > 500) {
+    if (typeof endpoint !== 'string' || endpoint.length > 500 || !isKnownPushService(endpoint)) {
       return res.status(400).json({ error: 'endpoint invalide' });
     }
     if (!keys?.p256dh || !keys?.auth) {

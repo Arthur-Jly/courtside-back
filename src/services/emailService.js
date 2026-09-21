@@ -29,6 +29,20 @@ if (process.env.SMTP_HOST) {
   logger.warn('Email service: SMTP_HOST not set — emails will be logged, not sent');
 }
 
+/**
+ * Échappement HTML : prénom, nom de terrain ou de club viennent d'utilisateurs.
+ * Sans ça, un prénom « <a href=…>Cliquez ici</a> » devenait un lien de phishing
+ * envoyé depuis notre domaine.
+ */
+function esc(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 /** Base layout matching the Courtside design tokens. */
 function layout(title, bodyHtml) {
   return `<!doctype html>
@@ -53,7 +67,7 @@ function layout(title, bodyHtml) {
 }
 
 function button(href, label) {
-  return `<a href="${href}" style="display:inline-block;background:#1F3A33;color:#F7F4EE;text-decoration:none;padding:12px 22px;border-radius:999px;font-size:14px;font-weight:600;margin:12px 0;">${label}</a>`;
+  return `<a href="${esc(href)}" style="display:inline-block;background:#1F3A33;color:#F7F4EE;text-decoration:none;padding:12px 22px;border-radius:999px;font-size:14px;font-weight:600;margin:12px 0;">${label}</a>`;
 }
 
 async function send(to, subject, html) {
@@ -83,7 +97,7 @@ async function sendPasswordReset(to, resetUrl) {
 }
 
 async function sendWelcome(to, name) {
-  const html = layout(`Bienvenue ${name} !`, `
+  const html = layout(`Bienvenue ${esc(name)} !`, `
     <p style="font-size:14px;line-height:1.6;color:#364541;">
       Votre compte Courtside est prêt. Trouvez un terrain, rejoignez des
       matchs près de chez vous et organisez vos sessions avec vos amis.
@@ -99,9 +113,9 @@ async function sendReservationConfirmed(to, { courtName, date, slot, amount }) {
       Ton créneau est verrouillé. Récapitulatif :
     </p>
     <table style="width:100%;font-size:14px;color:#364541;border-collapse:collapse;">
-      <tr><td style="padding:6px 0;color:#6E7A77;">Terrain</td><td style="text-align:right;font-weight:600;">${courtName || '—'}</td></tr>
-      <tr><td style="padding:6px 0;color:#6E7A77;">Date</td><td style="text-align:right;font-weight:600;">${date || '—'}</td></tr>
-      <tr><td style="padding:6px 0;color:#6E7A77;">Horaire</td><td style="text-align:right;font-weight:600;">${slot || '—'}</td></tr>
+      <tr><td style="padding:6px 0;color:#6E7A77;">Terrain</td><td style="text-align:right;font-weight:600;">${esc(courtName || '—')}</td></tr>
+      <tr><td style="padding:6px 0;color:#6E7A77;">Date</td><td style="text-align:right;font-weight:600;">${esc(date || '—')}</td></tr>
+      <tr><td style="padding:6px 0;color:#6E7A77;">Horaire</td><td style="text-align:right;font-weight:600;">${esc(slot || '—')}</td></tr>
       ${amount != null ? `<tr><td style="padding:6px 0;color:#6E7A77;">Montant payé</td><td style="text-align:right;font-weight:600;">${Number(amount).toFixed(2)} €</td></tr>` : ''}
     </table>
     ${button(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/profil`, 'Voir mes réservations')}
@@ -116,14 +130,14 @@ async function sendReservationConfirmed(to, { courtName, date, slot, amount }) {
 async function sendClubInvitation(to, { inviteUrl, clubName }) {
   const html = layout('Votre club est validé 🎉', `
     <p style="font-size:14px;line-height:1.6;color:#364541;">
-      Bonne nouvelle : la demande d'ajout de <strong>${clubName || 'votre club'}</strong>
+      Bonne nouvelle : la demande d'ajout de <strong>${esc(clubName || 'votre club')}</strong>
       sur Courtside a été validée. Créez votre espace gérant pour piloter vos
       terrains, votre planning et vos réservations.
     </p>
     ${button(inviteUrl, 'Créer mon espace club')}
     <p style="font-size:13px;line-height:1.6;color:#6E7A77;">
       Ce lien est valable <strong>7 jours</strong>. Il relie automatiquement votre
-      compte à ${clubName || 'votre club'}. Si vous n'êtes pas à l'origine de cette
+      compte à ${esc(clubName || 'votre club')}. Si vous n'êtes pas à l'origine de cette
       demande, ignorez cet email.
     </p>
   `);
@@ -136,9 +150,9 @@ async function sendReservationReminder(to, { courtName, date, slot }) {
       Petit rappel : tu joues demain.
     </p>
     <table style="width:100%;font-size:14px;color:#364541;border-collapse:collapse;">
-      <tr><td style="padding:6px 0;color:#6E7A77;">Terrain</td><td style="text-align:right;font-weight:600;">${courtName || '—'}</td></tr>
-      <tr><td style="padding:6px 0;color:#6E7A77;">Date</td><td style="text-align:right;font-weight:600;">${date || '—'}</td></tr>
-      <tr><td style="padding:6px 0;color:#6E7A77;">Horaire</td><td style="text-align:right;font-weight:600;">${slot || '—'}</td></tr>
+      <tr><td style="padding:6px 0;color:#6E7A77;">Terrain</td><td style="text-align:right;font-weight:600;">${esc(courtName || '—')}</td></tr>
+      <tr><td style="padding:6px 0;color:#6E7A77;">Date</td><td style="text-align:right;font-weight:600;">${esc(date || '—')}</td></tr>
+      <tr><td style="padding:6px 0;color:#6E7A77;">Horaire</td><td style="text-align:right;font-weight:600;">${esc(slot || '—')}</td></tr>
     </table>
     ${button(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/profil`, 'Voir ma réservation')}
   `);

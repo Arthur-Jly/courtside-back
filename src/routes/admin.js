@@ -2,7 +2,8 @@ const express = require('express');
 const AdminController = require('../controllers/admin.controller');
 const MetricsController = require('../controllers/metrics.controller');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
-const { asyncHandler, NotFoundError } = require('../middleware/errorHandler');
+const { asyncHandler, AppError, NotFoundError, ValidationError, ForbiddenError } = require('../middleware/errorHandler');
+const { validate, schemas } = require('../middleware/validation');
 
 const VALID_STATUS = new Set(['attente', 'confirme', 'rejete', 'suspendu']);
 
@@ -20,7 +21,7 @@ module.exports = function (db, cronService) {
 
   // Métriques de la phase 1 : densité par ville × sport, remplissage, rétention.
   // C'est là que se lit le go/no-go des 6 semaines.
-  router.get('/admin/metrics/phase1', asyncHandler(async (req, res) => {
+  router.get('/admin/metrics/phase1', validate(schemas.metricsPhase1Query, 'query'), asyncHandler(async (req, res) => {
     const { from, to, city, days } = req.query;
     res.json(await metrics.getPhase1Metrics({ from, to, city, days }));
   }));
@@ -39,7 +40,7 @@ module.exports = function (db, cronService) {
 
   router.get('/admin/users/:id', asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
+    if (!Number.isFinite(id)) throw new ValidationError('id invalide');
     const user = await controller.getUserDetail(id);
     if (!user) throw new NotFoundError('Utilisateur introuvable');
     res.json({ user });
@@ -47,16 +48,16 @@ module.exports = function (db, cronService) {
 
   router.put('/admin/users/:id/role', asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
+    if (!Number.isFinite(id)) throw new ValidationError('id invalide');
     const result = await controller.setUserRole(id, req.body?.role);
-    if (result.invalid) return res.status(400).json({ error: 'rôle invalide' });
+    if (result.invalid) throw new ValidationError('rôle invalide');
     if (result.notFound) throw new NotFoundError('Utilisateur introuvable');
     res.json(result);
   }));
 
   router.get('/admin/users/:id/export', asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
+    if (!Number.isFinite(id)) throw new ValidationError('id invalide');
     const data = await controller.exportUser(id);
     if (!data) throw new NotFoundError('Utilisateur introuvable');
     res.setHeader('Content-Disposition', `attachment; filename="courtside-user-${id}.json"`);
@@ -65,11 +66,11 @@ module.exports = function (db, cronService) {
 
   router.delete('/admin/users/:id', asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
-    if (Number(req.user.id) === id) return res.status(400).json({ error: 'Vous ne pouvez pas supprimer votre propre compte admin' });
+    if (!Number.isFinite(id)) throw new ValidationError('id invalide');
+    if (Number(req.user.id) === id) throw new ValidationError('Vous ne pouvez pas supprimer votre propre compte admin');
     const result = await controller.deleteUser(id);
     if (result.notFound) throw new NotFoundError('Utilisateur introuvable');
-    if (result.forbidden) return res.status(400).json({ error: 'Impossible de supprimer un compte admin' });
+    if (result.forbidden) throw new ValidationError('Impossible de supprimer un compte admin');
     res.json({ deleted: true });
   }));
 
@@ -90,7 +91,13 @@ module.exports = function (db, cronService) {
 
   router.get('/admin/finances/export', asyncHandler(async (req, res) => {
     const rows = await controller.getFinancesRows({ from: req.query.from, to: req.query.to });
-    const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    // Nom de club, email, etc. sont saisis par des utilisateurs : une cellule qui
+    // commence par = + - @ serait exécutée comme formule à l'ouverture dans Excel.
+    const esc = (v) => {
+      const s = String(v ?? '');
+      const safe = /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+      return `"${safe.replace(/"/g, '""')}"`;
+    };
     const header = 'id,date,club,terrain,email,montant,statut';
     const lines = rows.map(r => [r.id, r.start_time, r.club_name, r.terrain_name, r.user_email, r.price, r.status].map(esc).join(','));
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -100,16 +107,14 @@ module.exports = function (db, cronService) {
 
   router.get('/admin/clubs', asyncHandler(async (req, res) => {
     const status = req.query.status;
-    if (status && !VALID_STATUS.has(status)) {
-      return res.status(400).json({ error: 'statut invalide' });
-    }
+    if (status && !VALID_STATUS.has(status)) throw new ValidationError('statut invalide');
     const clubs = await controller.listClubs({ status });
     res.json({ clubs, count: clubs.length });
   }));
 
   router.get('/admin/clubs/:id', asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
+    if (!Number.isFinite(id)) throw new ValidationError('id invalide');
     const club = await controller.getClubDetailFull(id);
     if (!club) throw new NotFoundError('Club introuvable');
     res.json({ club });
@@ -117,20 +122,20 @@ module.exports = function (db, cronService) {
 
   router.put('/admin/clubs/:id/suspend', asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
+    if (!Number.isFinite(id)) throw new ValidationError('id invalide');
     const reason = typeof req.body?.reason === 'string' ? req.body.reason.slice(0, 500) : null;
     const result = await controller.setClubSuspension(id, true, req.user.id, reason);
     if (result.notFound) throw new NotFoundError('Club introuvable');
-    if (result.invalid) return res.status(400).json({ error: result.invalid });
+    if (result.invalid) throw new ValidationError(result.invalid);
     res.json(result);
   }));
 
   router.put('/admin/clubs/:id/unsuspend', asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
+    if (!Number.isFinite(id)) throw new ValidationError('id invalide');
     const result = await controller.setClubSuspension(id, false, req.user.id, null);
     if (result.notFound) throw new NotFoundError('Club introuvable');
-    if (result.invalid) return res.status(400).json({ error: result.invalid });
+    if (result.invalid) throw new ValidationError(result.invalid);
     res.json(result);
   }));
 
@@ -142,10 +147,10 @@ module.exports = function (db, cronService) {
 
   router.put('/admin/announcements/:id/cancel', asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
+    if (!Number.isFinite(id)) throw new ValidationError('id invalide');
     const result = await controller.cancelAnnouncement(id);
     if (result.notFound) throw new NotFoundError('Session introuvable');
-    if (result.invalid) return res.status(400).json({ error: result.invalid });
+    if (result.invalid) throw new ValidationError(result.invalid);
     res.json(result);
   }));
 
@@ -157,7 +162,7 @@ module.exports = function (db, cronService) {
 
   router.delete('/admin/reviews/:id', asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
+    if (!Number.isFinite(id)) throw new ValidationError('id invalide');
     const result = await controller.deleteReview(id);
     if (result.notFound) throw new NotFoundError('Avis introuvable');
     res.json(result);
@@ -180,21 +185,17 @@ module.exports = function (db, cronService) {
   }));
 
   router.post('/admin/cron/:name/run', asyncHandler(async (req, res) => {
-    if (!cronService) return res.status(503).json({ error: 'Service cron indisponible' });
+    if (!cronService) throw new AppError('Service cron indisponible', 503);
     const name = String(req.params.name || '');
     const known = cronService.listJobs().some(j => j.name === name);
     if (!known) throw new NotFoundError('Tâche inconnue');
-    try {
-      const result = await cronService.runJobManually(name);
-      res.json({ ran: true, name, result: result ?? null });
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
+    const result = await cronService.runJobManually(name);
+    res.json({ ran: true, name, result: result ?? null });
   }));
 
   router.put('/admin/clubs/:id/confirm', asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
+    if (!Number.isFinite(id)) throw new ValidationError('id invalide');
     const result = await controller.confirmClub(id, req.user.id);
     if (result.notFound) throw new NotFoundError('Club introuvable');
     res.json(result);
@@ -202,7 +203,7 @@ module.exports = function (db, cronService) {
 
   router.put('/admin/clubs/:id/reject', asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
+    if (!Number.isFinite(id)) throw new ValidationError('id invalide');
     const reason = typeof req.body?.reason === 'string' ? req.body.reason.slice(0, 500) : null;
     const result = await controller.rejectClub(id, req.user.id, reason);
     if (result.notFound) throw new NotFoundError('Club introuvable');
@@ -212,10 +213,10 @@ module.exports = function (db, cronService) {
   // Renvoyer manuellement une invitation (si l'email initial n'est pas arrivé).
   router.post('/admin/clubs/:id/resend-invitation', asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
+    if (!Number.isFinite(id)) throw new ValidationError('id invalide');
     const club = await controller.getClubDetail(id);
     if (!club) throw new NotFoundError('Club introuvable');
-    if (!club.email) return res.status(400).json({ error: 'Ce club n\'a pas d\'email de contact' });
+    if (!club.email) throw new ValidationError("Ce club n'a pas d'email de contact");
     await controller.sendInvitation(id, club.email, club.name);
     res.json({ invitationSent: true });
   }));

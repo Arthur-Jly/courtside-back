@@ -13,6 +13,7 @@
  */
 const webpush = require('web-push');
 const { logger } = require('./logger');
+const { queryPromise } = require('./dbHelpers');
 
 const PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
 const PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
@@ -59,29 +60,28 @@ function pushToUser(db, userId, type, payload = {}) {
   const message = describe(type, payload);
   if (!message) return;
 
-  db.query(
-    'SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ?',
-    [uid],
-    (err, rows) => {
-      if (err) { logger.error(`push: lecture des abonnements échouée (${err.message})`); return; }
+  const silent = (promise) => promise.catch(() => {});
+
+  queryPromise(db, 'SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ?', [uid])
+    .then((rows) => {
       for (const row of rows || []) {
         const subscription = { endpoint: row.endpoint, keys: { p256dh: row.p256dh, auth: row.auth } };
         webpush.sendNotification(subscription, JSON.stringify({ ...message, type }))
           .then(() => {
-            db.query('UPDATE push_subscriptions SET last_success_at = NOW(), failure_count = 0 WHERE id = ?', [row.id], () => {});
+            silent(queryPromise(db, 'UPDATE push_subscriptions SET last_success_at = NOW(), failure_count = 0 WHERE id = ?', [row.id]));
           })
           .catch((e) => {
             const gone = e.statusCode === 404 || e.statusCode === 410;
             if (gone) {
-              db.query('DELETE FROM push_subscriptions WHERE id = ?', [row.id], () => {});
+              silent(queryPromise(db, 'DELETE FROM push_subscriptions WHERE id = ?', [row.id]));
             } else {
-              db.query('UPDATE push_subscriptions SET failure_count = failure_count + 1 WHERE id = ?', [row.id], () => {});
+              silent(queryPromise(db, 'UPDATE push_subscriptions SET failure_count = failure_count + 1 WHERE id = ?', [row.id]));
               logger.error(`push: envoi échoué (${e.statusCode || '?'}) pour l'abonnement ${row.id}`);
             }
           });
       }
-    },
-  );
+    })
+    .catch((err) => logger.error(`push: lecture des abonnements échouée (${err.message})`));
 }
 
 function pushToUsers(db, userIds, type, payload = {}) {

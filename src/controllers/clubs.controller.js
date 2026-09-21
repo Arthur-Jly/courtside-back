@@ -3,6 +3,9 @@
  */
 
 const datagouvApi = require('../services/datagouvApi');
+const { queryPromise, queryOne, insert } = require('../utils/dbHelpers');
+const { logger } = require('../utils/logger');
+const { NotFoundError, ConflictError } = require('../middleware/errorHandler');
 
 class ClubsController {
   constructor(db) {
@@ -126,24 +129,16 @@ class ClubsController {
       sql += ` ORDER BY distance_km LIMIT ?`;
       params.push(parseInt(limit, 10));
 
-      return new Promise((resolve, reject) => {
-        this.db.query(sql, params, (err, clubs) => {
-          if (err) {
-            reject(err);
-          } else {
-            // Transforme les chaînes en tableaux
-            const clubsWithArrays = clubs.map(club => ({
-              ...club,
-              sports: club.sports ? club.sports.split(',') : [],
-              images: club.images ? club.images.split(',') : [],
-              lng: club.lon, // Alias pour compatibilité front
-              min_price: club.min_price || null,
-              max_price: club.max_price || null
-            }));
-            resolve(clubsWithArrays);
-          }
-        });
-      });
+      const clubs = await queryPromise(this.db, sql, params);
+      // Transforme les chaînes en tableaux
+      return clubs.map(club => ({
+        ...club,
+        sports: club.sports ? club.sports.split(',') : [],
+        images: club.images ? club.images.split(',') : [],
+        lng: club.lon, // Alias pour compatibilité front
+        min_price: club.min_price || null,
+        max_price: club.max_price || null,
+      }));
     }
 
     // Requête sans distance
@@ -186,23 +181,15 @@ class ClubsController {
     sql += ` GROUP BY c.id LIMIT ?`;
     params.push(parseInt(limit, 10));
 
-    return new Promise((resolve, reject) => {
-      this.db.query(sql, params, (err, clubs) => {
-        if (err) {
-          reject(err);
-        } else {
-          const clubsWithArrays = clubs.map(club => ({
-            ...club,
-            sports: club.sports ? club.sports.split(',') : [],
-            images: club.images ? club.images.split(',') : [],
-            lng: club.lon,
-            min_price: club.min_price || null,
-            max_price: club.max_price || null
-          }));
-          resolve(clubsWithArrays);
-        }
-      });
-    });
+    const clubs = await queryPromise(this.db, sql, params);
+    return clubs.map(club => ({
+      ...club,
+      sports: club.sports ? club.sports.split(',') : [],
+      images: club.images ? club.images.split(',') : [],
+      lng: club.lon,
+      min_price: club.min_price || null,
+      max_price: club.max_price || null,
+    }));
   }
 
   /**
@@ -218,13 +205,13 @@ class ClubsController {
     // 1. Récupérer et envoyer immédiatement les clubs de la base de données
     const dbClubs = await this._getDbClubs({ lat, lon, sport, radius, limit });
     
-    console.log(`[ClubsController] Envoi immédiat de ${dbClubs.length} clubs BDD`);
+    logger.debug(`ClubsController stream sending ${dbClubs.length} DB clubs`);
     onData({ clubs: dbClubs, source: 'database', done: false });
 
     // 2. Si coordonnées GPS fournies et includeDatagouv=true, récupérer les équipements data.gouv
     if (includeDatagouv && lat && lon) {
       try {
-        console.log('[ClubsController] Recherche équipements data.gouv.fr avec:', { lat, lon, sport, radius });
+        logger.debug('ClubsController datagouv search', { lat, lon, sport, radius });
         
         // Récupérer tous les équipements (l'API data.gouv gère déjà la pagination en interne)
         const equipements = await datagouvApi.searchEquipements({
@@ -245,7 +232,7 @@ class ClubsController {
             );
             
             const isLastBatch = i + batchSize >= equipements.length;
-            console.log(`[ClubsController] Envoi lot ${Math.floor(i / batchSize) + 1} de ${datagouvClubs.length} équipements data.gouv`);
+            logger.debug(`ClubsController batch ${Math.floor(i / batchSize) + 1} of ${datagouvClubs.length} datagouv equipments`);
             
             onData({ 
               clubs: datagouvClubs, 
@@ -259,11 +246,11 @@ class ClubsController {
             }
           }
         } else {
-          console.log('[ClubsController] Aucun équipement data.gouv trouvé');
+          logger.debug('ClubsController no datagouv equipment found');
           onData({ clubs: [], source: 'data.gouv.fr', done: true });
         }
       } catch (error) {
-        console.error('[ClubsController] Erreur data.gouv (non bloquante):', error.message);
+        logger.warn(`ClubsController datagouv error (non-blocking): ${error.message}`);
         // Envoyer un événement de fin même en cas d'erreur
         onData({ clubs: [], source: 'data.gouv.fr', done: true, error: error.message });
       }
@@ -290,23 +277,15 @@ class ClubsController {
       GROUP BY c.id
     `;
 
-    return new Promise((resolve, reject) => {
-      this.db.query(sql, [id], (err, clubs) => {
-        if (err) {
-          reject(err);
-        } else if (clubs.length === 0) {
-          reject(new Error('Club introuvable'));
-        } else {
-          const club = {
-            ...clubs[0],
-            sports: clubs[0].sports ? clubs[0].sports.split(',') : [],
-            images: clubs[0].images ? clubs[0].images.split(',') : [],
-            lng: clubs[0].lon
-          };
-          resolve(club);
-        }
-      });
-    });
+    const club = await queryOne(this.db, sql, [id]);
+    if (!club) throw new NotFoundError('Club introuvable');
+
+    return {
+      ...club,
+      sports: club.sports ? club.sports.split(',') : [],
+      images: club.images ? club.images.split(',') : [],
+      lng: club.lon,
+    };
   }
 
   /**
@@ -324,33 +303,20 @@ class ClubsController {
       GROUP BY t.id
     `;
 
-    return new Promise((resolve, reject) => {
-      this.db.query(sql, [clubId], async (err, terrains) => {
-        if (err) return reject(err);
-        
-        // Pour chaque terrain, récupérer les recurring_availabilities
-        const terrainsWithAvailabilities = await Promise.all(
-          terrains.map(async (terrain) => {
-            const availSql = 'SELECT day_of_week, start_time, end_time, is_closed FROM recurring_availabilities WHERE terrain_id = ? ORDER BY day_of_week';
-            
-            const availabilities = await new Promise((res, rej) => {
-              this.db.query(availSql, [terrain.id], (err, rows) => {
-                if (err) rej(err);
-                else res(rows || []);
-              });
-            });
-            
-            return {
-              ...terrain,
-              images: terrain.images ? terrain.images.split(',') : [],
-              recurring_availabilities: availabilities
-            };
-          })
-        );
-        
-        resolve(terrainsWithAvailabilities);
-      });
-    });
+    const terrains = await queryPromise(this.db, sql, [clubId]);
+
+    // Pour chaque terrain, récupérer les recurring_availabilities
+    return Promise.all(terrains.map(async (terrain) => {
+      const availabilities = await queryPromise(this.db,
+        'SELECT day_of_week, start_time, end_time, is_closed FROM recurring_availabilities WHERE terrain_id = ? ORDER BY day_of_week',
+        [terrain.id]);
+
+      return {
+        ...terrain,
+        images: terrain.images ? terrain.images.split(',') : [],
+        recurring_availabilities: availabilities || [],
+      };
+    }));
   }
 
   /**
@@ -360,16 +326,8 @@ class ClubsController {
   async getPartners() {
     const sql = "SELECT id, name, address, city, lat, lon FROM clubs WHERE status = 'confirme'";
 
-    return new Promise((resolve, reject) => {
-      this.db.query(sql, (err, partners) => {
-        if (err) {
-          reject(err);
-        } else {
-          const partnersWithLng = partners.map(p => ({ ...p, lng: p.lon }));
-          resolve(partnersWithLng);
-        }
-      });
-    });
+    const partners = await queryPromise(this.db, sql);
+    return partners.map(p => ({ ...p, lng: p.lon }));
   }
 
   /**
@@ -379,64 +337,33 @@ class ClubsController {
    */
   async createTerrain(terrainData) {
     const { club_id, name, sport_type, price_per_hour, slot_duration, recurring_availabilities } = terrainData;
-    
-    console.log('[createTerrain] Received data:', { club_id, name, sport_type, price_per_hour, slot_duration, recurring_availabilities });
-    
+
     const sql = `
-      INSERT INTO \`terrains\` (club_id, name, sport_type, price_per_hour, slot_duration) 
+      INSERT INTO \`terrains\` (club_id, name, sport_type, price_per_hour, slot_duration)
       VALUES (?, ?, ?, ?, ?)
     `;
-    
-    return new Promise((resolve, reject) => {
-      this.db.query(sql, [club_id, name, sport_type, price_per_hour, slot_duration], async (err, result) => {
-        if (err) return reject(err);
-        
-        const terrainId = result.insertId;
-        console.log('[createTerrain] Terrain created with ID:', terrainId);
-        
-        // Si des recurring_availabilities sont fournis, les créer
-        if (recurring_availabilities && Array.isArray(recurring_availabilities) && recurring_availabilities.length > 0) {
-          try {
-            console.log('[createTerrain] Inserting recurring_availabilities:', recurring_availabilities);
-            
-            const insertAvailSql = 'INSERT INTO recurring_availabilities (terrain_id, day_of_week, start_time, end_time, is_closed) VALUES ?';
-            const values = recurring_availabilities.map(avail => [
-              terrainId,
-              avail.day_of_week,
-              avail.start_time,
-              avail.end_time,
-              avail.is_closed || false
-            ]);
-            
-            await new Promise((res, rej) => {
-              this.db.query(insertAvailSql, [values], (err, result) => {
-                if (err) {
-                  console.error('[createTerrain] Error inserting recurring_availabilities:', err);
-                  rej(err);
-                } else {
-                  console.log('[createTerrain] Successfully inserted recurring_availabilities, affected rows:', result.affectedRows);
-                  res();
-                }
-              });
-            });
-          } catch (availErr) {
-            console.error('[createTerrain] Erreur lors de la création des recurring_availabilities:', availErr);
-            // On continue même si erreur sur les availabilities
-          }
-        } else {
-          console.log('[createTerrain] No recurring_availabilities to insert');
-        }
-        
-        resolve({ 
-          id: terrainId, 
-          club_id, 
-          name, 
-          sport_type, 
-          price_per_hour, 
-          slot_duration 
-        });
-      });
-    });
+
+    const terrainId = await insert(this.db, sql, [club_id, name, sport_type, price_per_hour, slot_duration]);
+
+    if (recurring_availabilities && Array.isArray(recurring_availabilities) && recurring_availabilities.length > 0) {
+      try {
+        const values = recurring_availabilities.map(avail => [
+          terrainId,
+          avail.day_of_week,
+          avail.start_time,
+          avail.end_time,
+          avail.is_closed || false,
+        ]);
+
+        await queryPromise(this.db,
+          'INSERT INTO recurring_availabilities (terrain_id, day_of_week, start_time, end_time, is_closed) VALUES ?',
+          [values]);
+      } catch (availErr) {
+        logger.error(`createTerrain recurring_availabilities: ${availErr.message}`);
+      }
+    }
+
+    return { id: terrainId, club_id, name, sport_type, price_per_hour, slot_duration };
   }
 
   /**
@@ -447,75 +374,37 @@ class ClubsController {
    */
   async updateTerrain(terrainId, terrainData) {
     const { name, sport_type, price_per_hour, slot_duration, recurring_availabilities } = terrainData;
-    
-    console.log('[updateTerrain] Updating terrain ID:', terrainId, 'with data:', { name, sport_type, price_per_hour, slot_duration, recurring_availabilities });
-    
+
     const sql = `
-      UPDATE \`terrains\` 
-      SET name = ?, sport_type = ?, price_per_hour = ?, slot_duration = ? 
+      UPDATE \`terrains\`
+      SET name = ?, sport_type = ?, price_per_hour = ?, slot_duration = ?
       WHERE id = ?
     `;
-    
-    return new Promise((resolve, reject) => {
-      this.db.query(sql, [name, sport_type, price_per_hour, slot_duration, terrainId], async (err) => {
-        if (err) return reject(err);
-        
-        console.log('[updateTerrain] Terrain updated successfully');
-        
-        // Si des recurring_availabilities sont fournis, les mettre à jour
-        if (recurring_availabilities && Array.isArray(recurring_availabilities)) {
-          try {
-            // Supprimer les anciens recurring_availabilities
-            await new Promise((res, rej) => {
-              this.db.query('DELETE FROM recurring_availabilities WHERE terrain_id = ?', [terrainId], (err, result) => {
-                if (err) {
-                  console.error('[updateTerrain] Error deleting old recurring_availabilities:', err);
-                  rej(err);
-                } else {
-                  console.log('[updateTerrain] Deleted old recurring_availabilities, affected rows:', result.affectedRows);
-                  res();
-                }
-              });
-            });
-            
-            // Insérer les nouveaux (seulement si le tableau n'est pas vide)
-            if (recurring_availabilities.length > 0) {
-              console.log('[updateTerrain] Inserting new recurring_availabilities:', recurring_availabilities);
-              
-              const insertAvailSql = 'INSERT INTO recurring_availabilities (terrain_id, day_of_week, start_time, end_time, is_closed) VALUES ?';
-              const values = recurring_availabilities.map(avail => [
-                terrainId,
-                avail.day_of_week,
-                avail.start_time,
-                avail.end_time,
-                avail.is_closed || false
-              ]);
-              
-              await new Promise((res, rej) => {
-                this.db.query(insertAvailSql, [values], (err, result) => {
-                  if (err) {
-                    console.error('[updateTerrain] Error inserting new recurring_availabilities:', err);
-                    rej(err);
-                  } else {
-                    console.log('[updateTerrain] Successfully inserted new recurring_availabilities, affected rows:', result.affectedRows);
-                    res();
-                  }
-                });
-              });
-            } else {
-              console.log('[updateTerrain] No recurring_availabilities to insert');
-            }
-          } catch (availErr) {
-            console.error('[updateTerrain] Erreur lors de la mise à jour des recurring_availabilities:', availErr);
-            // On continue même si erreur sur les availabilities
-          }
-        } else {
-          console.log('[updateTerrain] No recurring_availabilities provided for update');
+
+    await queryPromise(this.db, sql, [name, sport_type, price_per_hour, slot_duration, terrainId]);
+
+    if (recurring_availabilities && Array.isArray(recurring_availabilities)) {
+      try {
+        await queryPromise(this.db,
+          'DELETE FROM recurring_availabilities WHERE terrain_id = ?', [terrainId]);
+
+        if (recurring_availabilities.length > 0) {
+          const values = recurring_availabilities.map(avail => [
+            terrainId,
+            avail.day_of_week,
+            avail.start_time,
+            avail.end_time,
+            avail.is_closed || false,
+          ]);
+
+          await queryPromise(this.db,
+            'INSERT INTO recurring_availabilities (terrain_id, day_of_week, start_time, end_time, is_closed) VALUES ?',
+            [values]);
         }
-        
-        resolve();
-      });
-    });
+      } catch (availErr) {
+        logger.error(`updateTerrain recurring_availabilities: ${availErr.message}`);
+      }
+    }
   }
 
   /**
@@ -524,14 +413,7 @@ class ClubsController {
    * @returns {Promise<void>}
    */
   async deleteTerrain(terrainId) {
-    const sql = 'DELETE FROM `terrains` WHERE id = ?';
-    
-    return new Promise((resolve, reject) => {
-      this.db.query(sql, [terrainId], (err) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
+    await queryPromise(this.db, 'DELETE FROM `terrains` WHERE id = ?', [terrainId]);
   }
 
   /**
@@ -547,12 +429,8 @@ class ClubsController {
       ORDER BY display_order ASC, created_at ASC
     `;
     
-    return new Promise((resolve, reject) => {
-      this.db.query(sql, [terrainId], (err, images) => {
-        if (err) reject(err);
-        else resolve(images || []);
-      });
-    });
+    const images = await queryPromise(this.db, sql, [terrainId]);
+    return images || [];
   }
 
   /**
@@ -564,18 +442,9 @@ class ClubsController {
    */
   async addTerrainImage(terrainId, imageUrl, displayOrder = 0) {
     const sql = 'INSERT INTO terrain_images (terrain_id, image_url, display_order) VALUES (?, ?, ?)';
-    
-    return new Promise((resolve, reject) => {
-      this.db.query(sql, [terrainId, imageUrl, displayOrder], (err, result) => {
-        if (err) reject(err);
-        else resolve({ 
-          id: result.insertId, 
-          terrain_id: terrainId, 
-          image_url: imageUrl,
-          display_order: displayOrder 
-        });
-      });
-    });
+
+    const id = await insert(this.db, sql, [terrainId, imageUrl, displayOrder]);
+    return { id, terrain_id: terrainId, image_url: imageUrl, display_order: displayOrder };
   }
 
   /**
@@ -584,14 +453,7 @@ class ClubsController {
    * @returns {Promise<void>}
    */
   async deleteTerrainImage(imageId) {
-    const sql = 'DELETE FROM terrain_images WHERE id = ?';
-    
-    return new Promise((resolve, reject) => {
-      this.db.query(sql, [imageId], (err) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
+    await queryPromise(this.db, 'DELETE FROM terrain_images WHERE id = ?', [imageId]);
   }
 
   /**
@@ -603,82 +465,41 @@ class ClubsController {
     // Récupérer les infos de base du club
     const clubSql = "SELECT * FROM clubs WHERE id = ? AND status = 'confirme'";
     
-    return new Promise((resolve, reject) => {
-      this.db.query(clubSql, [clubId], async (err, clubs) => {
-        if (err) return reject(err);
-        if (clubs.length === 0) return reject(new Error('Club introuvable'));
-        
-        const club = clubs[0];
-        
-        try {
-          // Récupérer les sports
-          const sports = await this.getClubSports(clubId);
-          
-          // Récupérer les images
-          const imagesSql = 'SELECT image_url FROM club_images WHERE club_id = ?';
-          const images = await new Promise((res, rej) => {
-            this.db.query(imagesSql, [clubId], (err, results) => {
-              if (err) rej(err);
-              else res(results.map(r => r.image_url));
-            });
-          });
-          
-          // Récupérer les horaires
-          const hoursSql = 'SELECT * FROM club_opening_hours WHERE club_id = ? ORDER BY day_of_week';
-          const openingHours = await new Promise((res, rej) => {
-            this.db.query(hoursSql, [clubId], (err, results) => {
-              if (err) rej(err);
-              else res(results);
-            });
-          });
-          
-          // Récupérer les réseaux sociaux
-          // Note: Vérifier d'abord si la table club_socials existe avec la bonne structure
-          const socials = await new Promise((res, rej) => {
-            // Vérifier la structure de la table
-            this.db.query('DESCRIBE club_socials', (err, columns) => {
-              if (err) {
-                // Table n'existe pas, retourner un tableau vide
-                return res([]);
-              }
-              
-              const hasTypeColumn = columns.some((col) => col.Field === 'type');
-              
-              if (hasTypeColumn) {
-                // Nouvelle structure avec type
-                this.db.query('SELECT type, url FROM club_socials WHERE club_id = ?', [clubId], (err, results) => {
-                  if (err) rej(err);
-                  else res(results);
-                });
-              } else {
-                // Ancienne structure, retourner vide pour l'instant
-                res([]);
-              }
-            });
-          });
-          
-          // Récupérer les moyens de paiement
-          const paymentsSql = 'SELECT method FROM club_payment_methods WHERE club_id = ?';
-          const paymentMethods = await new Promise((res, rej) => {
-            this.db.query(paymentsSql, [clubId], (err, results) => {
-              if (err) rej(err);
-              else res(results.map(r => r.method));
-            });
-          });
-          
-          resolve({
-            ...club,
-            sports: sports.map(s => s.sport_name),
-            images,
-            openingHours,
-            socials,
-            paymentMethods
-          });
-        } catch (error) {
-          reject(error);
-        }
-      });
-    });
+    const club = await queryOne(this.db, clubSql, [clubId]);
+    if (!club) throw new NotFoundError('Club introuvable');
+
+    const sports = await this.getClubSports(clubId);
+
+    const imageRows = await queryPromise(this.db,
+      'SELECT image_url FROM club_images WHERE club_id = ?', [clubId]);
+
+    const openingHours = await queryPromise(this.db,
+      'SELECT * FROM club_opening_hours WHERE club_id = ? ORDER BY day_of_week', [clubId]);
+
+    // Réseaux sociaux : la table a connu deux structures. Sans colonne `type`
+    // (ou sans table du tout), on renvoie une liste vide plutôt que d'échouer.
+    let socials = [];
+    try {
+      const columns = await queryPromise(this.db, 'DESCRIBE club_socials');
+      if (columns.some((col) => col.Field === 'type')) {
+        socials = await queryPromise(this.db,
+          'SELECT type, url FROM club_socials WHERE club_id = ?', [clubId]);
+      }
+    } catch {
+      socials = [];
+    }
+
+    const paymentRows = await queryPromise(this.db,
+      'SELECT method FROM club_payment_methods WHERE club_id = ?', [clubId]);
+
+    return {
+      ...club,
+      sports: sports.map(s => s.sport_name),
+      images: imageRows.map(r => r.image_url),
+      openingHours,
+      socials,
+      paymentMethods: paymentRows.map(r => r.method),
+    };
   }
 
   /**
@@ -688,20 +509,20 @@ class ClubsController {
    * @returns {Promise<void>}
    */
   async updateClubInfo(clubId, data) {
-    const { name, description, address, city, postal_code, phone, email, website } = data;
-    const sql = `
-      UPDATE clubs 
-      SET name = ?, description = ?, address = ?, city = ?, postal_code = ?, 
-          phone = ?, email = ?, website = ?
-      WHERE id = ?
-    `;
-    
-    return new Promise((resolve, reject) => {
-      this.db.query(sql, [name, description, address, city, postal_code, phone, email, website, clubId], (err) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
+    // Liste blanche, et seuls les champs fournis sont écrits : un champ absent
+    // (undefined) faisait échouer toute la requête côté mysql2.
+    const allowed = ['name', 'description', 'address', 'city', 'postal_code', 'phone', 'email', 'website'];
+    const assignments = [];
+    const params = [];
+    for (const key of allowed) {
+      if (data[key] !== undefined) {
+        assignments.push(`${key} = ?`);
+        params.push(data[key]);
+      }
+    }
+    if (assignments.length === 0) return;
+
+    await queryPromise(this.db, `UPDATE clubs SET ${assignments.join(', ')} WHERE id = ?`, [...params, clubId]);
   }
 
   /**
@@ -712,24 +533,13 @@ class ClubsController {
    */
   async updateClubOpeningHours(clubId, hours) {
     // Supprimer les horaires existants
-    const deleteSql = 'DELETE FROM club_opening_hours WHERE club_id = ?';
-    
-    return new Promise((resolve, reject) => {
-      this.db.query(deleteSql, [clubId], (err) => {
-        if (err) return reject(err);
-        
-        // Insérer les nouveaux horaires
-        if (hours.length === 0) return resolve();
-        
-        const insertSql = 'INSERT INTO club_opening_hours (club_id, day_of_week, open_time, close_time, is_closed) VALUES ?';
-        const values = hours.map(h => [clubId, h.day_of_week, h.open_time, h.close_time, h.is_closed || false]);
-        
-        this.db.query(insertSql, [values], (err) => {
-          if (err) reject(err);
-          else resolve();
-        });
-      });
-    });
+    await queryPromise(this.db, 'DELETE FROM club_opening_hours WHERE club_id = ?', [clubId]);
+    if (hours.length === 0) return;
+
+    const values = hours.map(h => [clubId, h.day_of_week, h.open_time, h.close_time, h.is_closed || false]);
+    await queryPromise(this.db,
+      'INSERT INTO club_opening_hours (club_id, day_of_week, open_time, close_time, is_closed) VALUES ?',
+      [values]);
   }
 
   /**
@@ -740,24 +550,11 @@ class ClubsController {
    */
   async updateClubSocials(clubId, socials) {
     // Supprimer les réseaux existants
-    const deleteSql = 'DELETE FROM club_socials WHERE club_id = ?';
-    
-    return new Promise((resolve, reject) => {
-      this.db.query(deleteSql, [clubId], (err) => {
-        if (err) return reject(err);
-        
-        // Insérer les nouveaux réseaux
-        if (socials.length === 0) return resolve();
-        
-        const insertSql = 'INSERT INTO club_socials (club_id, type, url) VALUES ?';
-        const values = socials.map(s => [clubId, s.type, s.url]);
-        
-        this.db.query(insertSql, [values], (err) => {
-          if (err) reject(err);
-          else resolve();
-        });
-      });
-    });
+    await queryPromise(this.db, 'DELETE FROM club_socials WHERE club_id = ?', [clubId]);
+    if (socials.length === 0) return;
+
+    const values = socials.map(s => [clubId, s.type, s.url]);
+    await queryPromise(this.db, 'INSERT INTO club_socials (club_id, type, url) VALUES ?', [values]);
   }
 
   /**
@@ -768,24 +565,11 @@ class ClubsController {
    */
   async updateClubPaymentMethods(clubId, methods) {
     // Supprimer les méthodes existantes
-    const deleteSql = 'DELETE FROM club_payment_methods WHERE club_id = ?';
-    
-    return new Promise((resolve, reject) => {
-      this.db.query(deleteSql, [clubId], (err) => {
-        if (err) return reject(err);
-        
-        // Insérer les nouvelles méthodes
-        if (methods.length === 0) return resolve();
-        
-        const insertSql = 'INSERT INTO club_payment_methods (club_id, method) VALUES ?';
-        const values = methods.map(m => [clubId, m]);
-        
-        this.db.query(insertSql, [values], (err) => {
-          if (err) reject(err);
-          else resolve();
-        });
-      });
-    });
+    await queryPromise(this.db, 'DELETE FROM club_payment_methods WHERE club_id = ?', [clubId]);
+    if (methods.length === 0) return;
+
+    const values = methods.map(m => [clubId, m]);
+    await queryPromise(this.db, 'INSERT INTO club_payment_methods (club_id, method) VALUES ?', [values]);
   }
 
   /**
@@ -794,14 +578,7 @@ class ClubsController {
    * @returns {Promise<Array>} Liste des sports
    */
   async getClubSports(clubId) {
-    const sql = 'SELECT id, club_id, sport_name FROM club_sports WHERE club_id = ?';
-    
-    return new Promise((resolve, reject) => {
-      this.db.query(sql, [clubId], (err, results) => {
-        if (err) reject(err);
-        else resolve(results);
-      });
-    });
+    return queryPromise(this.db, 'SELECT id, club_id, sport_name FROM club_sports WHERE club_id = ?', [clubId]);
   }
 
   /**
@@ -811,14 +588,8 @@ class ClubsController {
    * @returns {Promise<Object>} Sport créé
    */
   async addClubSport(clubId, sportName) {
-    const sql = 'INSERT INTO club_sports (club_id, sport_name) VALUES (?, ?)';
-    
-    return new Promise((resolve, reject) => {
-      this.db.query(sql, [clubId, sportName], (err, result) => {
-        if (err) reject(err);
-        else resolve({ id: result.insertId, club_id: clubId, sport_name: sportName });
-      });
-    });
+    const id = await insert(this.db, 'INSERT INTO club_sports (club_id, sport_name) VALUES (?, ?)', [clubId, sportName]);
+    return { id, club_id: clubId, sport_name: sportName };
   }
 
   /**
@@ -829,25 +600,15 @@ class ClubsController {
    */
   async removeClubSport(clubId, sportName) {
     // Vérifier d'abord si des terrains utilisent ce sport
-    const checkSql = 'SELECT COUNT(*) as count FROM terrains WHERE club_id = ? AND sport_type = ?';
-    
-    return new Promise((resolve, reject) => {
-      this.db.query(checkSql, [clubId, sportName], (err, results) => {
-        if (err) return reject(err);
-        
-        const count = results[0].count;
-        if (count > 0) {
-          return reject(new Error(`Impossible de supprimer ce sport car ${count} terrain(s) l'utilise(nt) encore`));
-        }
-        
-        // Si aucun terrain n'utilise ce sport, on peut le supprimer
-        const deleteSql = 'DELETE FROM club_sports WHERE club_id = ? AND sport_name = ?';
-        this.db.query(deleteSql, [clubId, sportName], (err) => {
-          if (err) reject(err);
-          else resolve();
-        });
-      });
-    });
+    const row = await queryOne(this.db,
+      'SELECT COUNT(*) as count FROM terrains WHERE club_id = ? AND sport_type = ?', [clubId, sportName]);
+    const count = row.count;
+    if (count > 0) {
+      throw new ConflictError(`Impossible de supprimer ce sport car ${count} terrain(s) l'utilise(nt) encore`);
+    }
+
+    await queryPromise(this.db,
+      'DELETE FROM club_sports WHERE club_id = ? AND sport_name = ?', [clubId, sportName]);
   }
 
   /**
@@ -873,27 +634,26 @@ class ClubsController {
     // Utiliser la description fournie ou un message par défaut
     const finalDescription = description || 'Demande d\'ajout de club en attente de validation';
     
-    return new Promise((resolve, reject) => {
-      this.db.query(sql, [name, city, phone, email, address || null, postal_code || null, finalDescription], (err, result) => {
-        if (err) {
-          console.error('❌ Erreur SQL createClub:', err);
-          reject(err);
-        } else {
-          console.log('✅ Club créé avec ID:', result.insertId);
-          resolve({
-            id: result.insertId,
-            name,
-            city,
-            phone,
-            email,
-            address,
-            postal_code,
-            description: finalDescription,
-            status: 'attente'
-          });
-        }
-      });
-    });
+    let id;
+    try {
+      id = await insert(this.db, sql, [name, city, phone, email, address || null, postal_code || null, finalDescription]);
+    } catch (err) {
+      logger.error(`createClub SQL: ${err.message}`);
+      throw err;
+    }
+
+    logger.info(`Club créé id=${id}`);
+    return {
+      id,
+      name,
+      city,
+      phone,
+      email,
+      address,
+      postal_code,
+      description: finalDescription,
+      status: 'attente',
+    };
   }
 }
 

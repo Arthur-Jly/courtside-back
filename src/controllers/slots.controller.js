@@ -1,602 +1,425 @@
-module.exports = function(db) {
-  const pool = (db && typeof db.promise === 'function') ? db.promise() : db;
+const { poolOf, queryPromise, queryOne } = require('../utils/dbHelpers');
+const { logger } = require('../utils/logger');
+const {
+  AppError,
+  NotFoundError,
+  ForbiddenError,
+  ConflictError,
+  ValidationError,
+} = require('../middleware/errorHandler');
+const { formatLocalYmd, timeToMinutes, todayLocalYmd, addDaysYmd } = require('../utils/dates');
+const config = require('../config');
 
-// Helper: ensure date part is YYYY-MM-DD string (local timezone to avoid UTC offset)
-function formatDatePart(d){
-  if (!d) return null;
-  // if already string in YYYY-MM-DD format
-  if (typeof d === 'string'){
-    const m = d.match(/^(\d{4}-\d{2}-\d{2})/);
-    if (m) return m[1];
-    // try Date parse fallback — use local date parts to avoid UTC shift
-    const dt = new Date(d);
-    if (!isNaN(dt.getTime())) {
-      const year = dt.getFullYear();
-      const month = String(dt.getMonth() + 1).padStart(2, '0');
-      const day = String(dt.getDate()).padStart(2, '0');
-      return `${year}-${month}-${day}`;
-    }
-    return d;
+const YMD = /^\d{4}-\d{2}-\d{2}$/;
+const MAX_GENERATION_DAYS = 366;
+
+// Une plage non bornée (toDate=2999-12-31) bouclait sur des centaines de milliers
+// de jours et saturait la mémoire du process pour un simple POST de gérant.
+function assertValidRange(fromDate, toDate) {
+  if (!YMD.test(String(fromDate)) || !YMD.test(String(toDate)) || toDate < fromDate) {
+    throw new ValidationError('Plage de dates invalide');
   }
-  if (d instanceof Date) {
-    const year = d.getFullYear();
-    const month = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
+  const days = (new Date(`${toDate}T00:00:00Z`) - new Date(`${fromDate}T00:00:00Z`)) / 86400000;
+  if (days > MAX_GENERATION_DAYS) {
+    throw new ValidationError(`Plage de dates trop large (${MAX_GENERATION_DAYS} jours maximum)`);
   }
-  // numeric timestamp
-  try{
-    const dt = new Date(d);
-    if (!isNaN(dt.getTime())) {
-      const year = dt.getFullYear();
-      const month = String(dt.getMonth() + 1).padStart(2, '0');
-      const day = String(dt.getDate()).padStart(2, '0');
-      return `${year}-${month}-${day}`;
-    }
-  }catch(e){}
-  return String(d);
 }
 
-function timeToMinutes(t){
-  const parts = (t || '').split(':').map(Number);
-  const h = parts[0] || 0;
-  const m = parts[1] || 0;
-  return h*60 + m;
-}
+module.exports = function (db) {
+  const pool = poolOf(db);
 
-async function generateSlotsForTerrain(terrainId, fromDate, toDate, slotDurationMinutes){
-  const [raRows] = await pool.query('SELECT id, day_of_week, start_time, end_time, is_closed FROM recurring_availabilities WHERE terrain_id = ?', [terrainId]);
-  const recs = raRows || [];
+  async function generateSlotsForTerrain(terrainId, fromDate, toDate, slotDurationMinutes) {
+    assertValidRange(fromDate, toDate);
+    const recs = await queryPromise(
+      db,
+      'SELECT id, day_of_week, start_time, end_time, is_closed FROM recurring_availabilities WHERE terrain_id = ?',
+      [terrainId],
+    );
 
-  const [trows] = await pool.query('SELECT club_id FROM `terrains` WHERE id = ?', [terrainId]);
-  let clubId = (trows && trows[0]) ? trows[0].club_id : null;
+    const terrainRow = await queryOne(db, 'SELECT club_id FROM `terrains` WHERE id = ?', [terrainId]);
+    let clubId = terrainRow ? terrainRow.club_id : null;
 
-  let durationMinutes = slotDurationMinutes;
-  if (!durationMinutes) {
-    try {
-      const [tInfoRows] = await pool.query('SELECT slot_duration FROM `terrains` WHERE id = ?', [terrainId]);
-      if (tInfoRows && tInfoRows[0] && tInfoRows[0].slot_duration) {
-        durationMinutes = Number(tInfoRows[0].slot_duration) || 60;
-      } else {
-        durationMinutes = 60;
-      }
-    } catch (e) {
-      durationMinutes = 60;
-    }
-  }
-
-  const [exRows] = await pool.query("SELECT id, DATE_FORMAT(date, '%Y-%m-%d') AS date_str, is_closed, special_open_time, special_close_time FROM availability_exceptions WHERE terrain_id = ?", [terrainId]);
-  const exs = (exRows || []).reduce((acc,e)=>{ acc[e.date_str]=e; return acc; }, {});
-
-  const slotsToInsert = [];
-  const dayMs = 24*60*60*1000;
-  const [existingRows] = await pool.query("SELECT DATE_FORMAT(date, '%Y-%m-%d') AS date_str, start_time, end_time FROM slots WHERE terrain_id = ? AND DATE(date) BETWEEN ? AND ?", [terrainId, fromDate, toDate]);
-  // build map date => [{sMin, eMin}, ...]
-  const existingByDate = {};
-  (existingRows || []).forEach(r => {
-    const key = r.date_str || String(r.date);
-    const sMin = timeToMinutes(r.start_time);
-    const eMin = timeToMinutes(r.end_time);
-    existingByDate[key] = existingByDate[key] || [];
-    existingByDate[key].push({ sMin, eMin });
-  });
-  // iterate days using explicit UTC midnight to avoid local timezone parsing differences
-  const startDate = new Date(fromDate + 'T00:00:00Z');
-  const endDate = new Date(toDate + 'T00:00:00Z');
-  for(let d = new Date(startDate); d.getTime() <= endDate.getTime(); d = new Date(d.getTime()+dayMs)){
-    const isoDate = d.toISOString().slice(0,10);
-    const exception = exs[isoDate];
-
-    if(exception && exception.is_closed){
-      continue; // closed whole day
+    let durationMinutes = slotDurationMinutes;
+    if (!durationMinutes) {
+      const tInfo = await queryOne(db, 'SELECT slot_duration FROM `terrains` WHERE id = ?', [terrainId]);
+      durationMinutes = Number(tInfo?.slot_duration) || config.slots.defaultDurationMinutes;
     }
 
-    // Find recurring that match this day of week
-    const dow = d.getDay(); // 0=Sun ... 6=Sat (assume DB uses same)
-    for(const r of recs){
-      if(r.is_closed) continue;
-      if(Number(r.day_of_week) !== dow) continue;
+    const exRows = await queryPromise(
+      db,
+      "SELECT id, DATE_FORMAT(date, '%Y-%m-%d') AS date_str, is_closed, special_open_time, special_close_time FROM availability_exceptions WHERE terrain_id = ?",
+      [terrainId],
+    );
+    const exs = exRows.reduce((acc, e) => { acc[e.date_str] = e; return acc; }, {});
 
-      // determine start/end, possibly overridden by exception special times
-      const start = (exception && exception.special_open_time) ? exception.special_open_time : r.start_time;
-      const end = (exception && exception.special_close_time) ? exception.special_close_time : r.end_time;
+    const existingRows = await queryPromise(
+      db,
+      "SELECT DATE_FORMAT(date, '%Y-%m-%d') AS date_str, start_time, end_time FROM slots WHERE terrain_id = ? AND DATE(date) BETWEEN ? AND ?",
+      [terrainId, fromDate, toDate],
+    );
+    const existingByDate = {};
+    existingRows.forEach((r) => {
+      const key = r.date_str || String(r.date);
+      const sMin = timeToMinutes(r.start_time);
+      const eMin = timeToMinutes(r.end_time);
+      existingByDate[key] = existingByDate[key] || [];
+      existingByDate[key].push({ sMin, eMin });
+    });
 
-      let cur = timeToMinutes(start);
-      const endM = timeToMinutes(end);
-      while(cur + durationMinutes <= endM){
-        const sh = String(Math.floor(cur/60)).padStart(2,'0') + ':' + String(cur%60).padStart(2,'0');
-        const ehMin = cur + durationMinutes;
-        const eh = String(Math.floor(ehMin/60)).padStart(2,'0') + ':' + String(ehMin%60).padStart(2,'0');
+    const slotsToInsert = [];
+    const dayMs = 24 * 60 * 60 * 1000;
+    const startDate = new Date(fromDate + 'T00:00:00Z');
+    const endDate = new Date(toDate + 'T00:00:00Z');
+    for (let d = new Date(startDate); d.getTime() <= endDate.getTime(); d = new Date(d.getTime() + dayMs)) {
+      const isoDate = d.toISOString().slice(0, 10);
+      const exception = exs[isoDate];
+      if (exception && exception.is_closed) continue;
 
-        // Check overlap with existing slots on the same date
-        const existing = existingByDate[isoDate] || [];
-        const newS = cur;
-        const newE = ehMin;
-        let overlaps = false;
-        for (const ex of existing) {
-          // overlap if ex.sMin < newE && ex.eMin > newS
-          if (ex.sMin < newE && ex.eMin > newS) { overlaps = true; break; }
+      // `d` est à minuit UTC : getDay() (fuseau local) donnait la veille sur un serveur à l'ouest de UTC.
+      const dow = d.getUTCDay();
+      for (const r of recs) {
+        if (r.is_closed) continue;
+        if (Number(r.day_of_week) !== dow) continue;
+
+        const start = (exception && exception.special_open_time) ? exception.special_open_time : r.start_time;
+        const end = (exception && exception.special_close_time) ? exception.special_close_time : r.end_time;
+
+        let cur = timeToMinutes(start);
+        const endM = timeToMinutes(end);
+        while (cur + durationMinutes <= endM) {
+          const sh = String(Math.floor(cur / 60)).padStart(2, '0') + ':' + String(cur % 60).padStart(2, '0');
+          const ehMin = cur + durationMinutes;
+          const eh = String(Math.floor(ehMin / 60)).padStart(2, '0') + ':' + String(ehMin % 60).padStart(2, '0');
+
+          const existing = existingByDate[isoDate] || [];
+          const overlaps = existing.some((ex) => ex.sMin < ehMin && ex.eMin > cur);
+          if (!overlaps) {
+            slotsToInsert.push([terrainId, clubId, isoDate, sh, eh, 'free']);
+          }
+          cur += durationMinutes;
         }
-        if (!overlaps) {
-          // include clubId so slots can be queried by club without join
-          slotsToInsert.push([terrainId, clubId, isoDate, sh, eh, 'free']);
-        }
-        cur += durationMinutes;
       }
     }
-  }
 
-  if(slotsToInsert.length===0) return { inserted: 0 };
+    if (slotsToInsert.length === 0) return { inserted: 0 };
 
-  // Ensure we have a clubId value (re-fetch in case terrains changed)
-  try{
     if (clubId == null) {
-      const [trows2] = await pool.query('SELECT club_id FROM `terrains` WHERE id = ?', [terrainId]);
-      clubId = (trows2 && trows2[0]) ? trows2[0].club_id : clubId;
+      logger.warn(`generateSlotsForTerrain: terrain ${terrainId} has no club_id, fallback 0`);
+      clubId = 0;
+      for (const row of slotsToInsert) row[1] = clubId;
     }
-  } catch(e) {
-    // ignore — we'll fallback below
-  }
 
-  // If still null, use fallback 0 to avoid inserting NULLs (mock data scenario)
-  if (clubId == null) {
-    console.warn(`generateSlotsForTerrain: terrain ${terrainId} has no club_id, inserting 0 as fallback`);
-    clubId = 0;
-    // Also patch each slotsToInsert to ensure clubId column is set (in case any were built earlier)
-    for (let i = 0; i < slotsToInsert.length; i++) {
-      const row = slotsToInsert[i];
-      // row format: [terrainId, clubId, date, start, end, status]
-      row[1] = clubId;
-    }
-  }
-
-  const valuesSql = slotsToInsert.map(()=> '(?, ?, ?, ?, ?, ?)').join(', ');
-  const flat = slotsToInsert.flat();
-  const sql = `INSERT IGNORE INTO slots (terrain_id, club_id, date, start_time, end_time, status) VALUES ${valuesSql}`;
-  try {
-    const [result] = await pool.query(sql, flat);
-    const inserted = (result && (result.affectedRows || result.affected_rows)) ? (result.affectedRows || result.affected_rows) : 0;
-    return { inserted };
-  } catch (err) {
-    console.error('Error inserting slots:', err && err.message ? err.message : err);
-    return { inserted: 0, error: err && err.message };
-  }
-}
-
-async function adminGenerateSlots(req, res){
-  // Scope to caller's club. Never generate for terrains outside their club.
-  const adminClubId = req.user && req.user.club_id;
-  if (!adminClubId) return res.status(403).json({ error: 'club admin scope required' });
-
-  const daysRaw = Object.prototype.hasOwnProperty.call(req.body, 'days') ? req.body.days : undefined;
-  const weeksRaw = Object.prototype.hasOwnProperty.call(req.body, 'weeks') ? req.body.weeks : undefined;
-  const days = typeof daysRaw !== 'undefined' ? Number(daysRaw) : null;
-  const weeks = typeof weeksRaw !== 'undefined' ? Number(weeksRaw) : null;
-  const fromDate = req.body.fromDate || new Date().toISOString().slice(0,10);
-  let toDate;
-  if (req.body.toDate) {
-    toDate = req.body.toDate;
-  } else if (days !== null) {
-    toDate = new Date(new Date(fromDate).getTime() + days*24*60*60*1000).toISOString().slice(0,10);
-  } else if (weeks !== null) {
-    toDate = new Date(new Date(fromDate).getTime() + (weeks*7*24*60*60*1000)).toISOString().slice(0,10);
-  } else {
-    toDate = new Date(new Date(fromDate).getTime() + (6*7*24*60*60*1000)).toISOString().slice(0,10);
-  }
-
-  const [tRows] = await pool.query('SELECT id FROM `terrains` WHERE club_id = ?', [adminClubId]);
-  const terrains = tRows || [];
-  let totalInserted = 0;
-  for(const t of terrains){
-    const r = await generateSlotsForTerrain(t.id, fromDate, toDate);
-    totalInserted += r.inserted || 0;
-  }
-
-  res.json({ ok: true, fromDate, toDate, totalInserted });
-}
-
-async function adminGenerateSlotsForTerrain(req, res){
-  const terrainId = Number(req.body.terrain_id);
-  if(!Number.isFinite(terrainId)) return res.status(400).json({ error: 'terrain_id required' });
-  // ownership: terrain must belong to caller's club
-  const [trows] = await pool.query('SELECT club_id FROM terrains WHERE id = ?', [terrainId]);
-  if (!trows || !trows[0]) return res.status(404).json({ error: 'terrain not found' });
-  if (Number(trows[0].club_id) !== Number(req.user.club_id)) return res.status(403).json({ error: 'forbidden' });
-  const weeksRaw = Object.prototype.hasOwnProperty.call(req.body, 'weeks') ? req.body.weeks : undefined;
-  const weeks = typeof weeksRaw !== 'undefined' ? Number(weeksRaw) : null;
-  const fromDate = req.body.fromDate || new Date().toISOString().slice(0,10);
-  let toDate = req.body.toDate;
-  if (typeof toDate === 'undefined' || toDate === null) {
-    if (weeks !== null) {
-      toDate = new Date(new Date(fromDate).getTime() + (weeks*7*24*60*60*1000)).toISOString().slice(0,10);
-    } else {
-      toDate = new Date(new Date(fromDate).getTime() + (6*7*24*60*60*1000)).toISOString().slice(0,10);
-    }
-  }
-  const r = await generateSlotsForTerrain(terrainId, fromDate, toDate);
-  res.json({ ok:true, terrainId, fromDate, toDate, inserted: r.inserted });
-}
-
-async function adminGenerateSlotsForClub(req, res){
-  const clubId = Number(req.body.club_id);
-  if(!Number.isFinite(clubId)) return res.status(400).json({ error: 'club_id required' });
-  if (Number(req.user.club_id) !== clubId) return res.status(403).json({ error: 'forbidden' });
-  const weeksRaw = Object.prototype.hasOwnProperty.call(req.body, 'weeks') ? req.body.weeks : undefined;
-  const weeks = typeof weeksRaw !== 'undefined' ? Number(weeksRaw) : null;
-  const fromDate = req.body.fromDate || new Date().toISOString().slice(0,10);
-  let toDate = req.body.toDate;
-  if (typeof toDate === 'undefined' || toDate === null) {
-    if (weeks !== null) {
-      toDate = new Date(new Date(fromDate).getTime() + (weeks*7*24*60*60*1000)).toISOString().slice(0,10);
-    } else {
-      toDate = new Date(new Date(fromDate).getTime() + (6*7*24*60*60*1000)).toISOString().slice(0,10);
+    const valuesSql = slotsToInsert.map(() => '(?, ?, ?, ?, ?, ?)').join(', ');
+    const flat = slotsToInsert.flat();
+    try {
+      const result = await queryPromise(
+        db,
+        `INSERT IGNORE INTO slots (terrain_id, club_id, date, start_time, end_time, status) VALUES ${valuesSql}`,
+        flat,
+      );
+      return { inserted: result?.affectedRows || 0 };
+    } catch (err) {
+      logger.error(`Error inserting slots: ${err.message}`);
+      return { inserted: 0, error: err.message };
     }
   }
 
-  const [terrRows] = await pool.query('SELECT id FROM `terrains` WHERE club_id = ?', [clubId]);
-  const terrains = terrRows || [];
-  let totalInserted = 0;
-  for(const t of terrains){
-    const r = await generateSlotsForTerrain(t.id, fromDate, toDate);
-    totalInserted += r.inserted || 0;
+  async function adminGenerateSlots(req, res) {
+    const adminClubId = req.user && req.user.club_id;
+    if (!adminClubId) throw new ForbiddenError('club admin scope required');
+
+    const daysRaw = Object.prototype.hasOwnProperty.call(req.body, 'days') ? req.body.days : undefined;
+    const weeksRaw = Object.prototype.hasOwnProperty.call(req.body, 'weeks') ? req.body.weeks : undefined;
+    const days = typeof daysRaw !== 'undefined' ? Number(daysRaw) : null;
+    const weeks = typeof weeksRaw !== 'undefined' ? Number(weeksRaw) : null;
+    const fromDate = req.body.fromDate || todayLocalYmd();
+    let toDate;
+    if (req.body.toDate) toDate = req.body.toDate;
+    else if (days !== null) toDate = addDaysYmd(fromDate, days);
+    else if (weeks !== null) toDate = addDaysYmd(fromDate, weeks * 7);
+    else toDate = addDaysYmd(fromDate, config.slots.defaultGenerationWeeks * 7);
+
+    const terrains = await queryPromise(db, 'SELECT id FROM `terrains` WHERE club_id = ?', [adminClubId]);
+    let totalInserted = 0;
+    for (const t of terrains) {
+      const r = await generateSlotsForTerrain(t.id, fromDate, toDate);
+      totalInserted += r.inserted || 0;
+    }
+
+    res.json({ ok: true, fromDate, toDate, totalInserted });
   }
 
-  res.json({ ok:true, clubId, fromDate, toDate, totalInserted, terrains: terrains.map(t=>t.id) });
-}
+  async function adminGenerateSlotsForTerrain(req, res) {
+    const terrainId = Number(req.body.terrain_id);
+    if (!Number.isFinite(terrainId)) throw new ValidationError('terrain_id requis');
 
-async function listSlots(req, res){
-  const terrainId = req.params.id;
-  const date = req.query.date; // optional
-  const status = req.query.status; // optional
-  const params = [terrainId];
-  let sql = `
-    SELECT s.*, t.name as terrain_name, t.sport_type, t.club_id
-    FROM slots s
-    JOIN terrains t ON s.terrain_id = t.id
-    WHERE s.terrain_id = ?
-  `;
+    const t = await queryOne(db, 'SELECT club_id FROM terrains WHERE id = ?', [terrainId]);
+    if (!t) throw new NotFoundError('Terrain introuvable');
+    if (Number(t.club_id) !== Number(req.user.club_id)) throw new ForbiddenError();
 
-  // Never surface past days to the booking UI.
-  sql += ' AND s.date >= CURDATE()';
-
-  if(date){ sql += ' AND DATE(s.date) = ?'; params.push(date); }
-  if(status){ sql += ' AND s.status = ?'; params.push(status); }
-  sql += ' ORDER BY s.date, s.start_time';
-  const [rows] = await pool.query(sql, params);
-  res.json(rows || []);
-}
-
-async function listSlotsByClub(req, res){
-  const clubId = req.params.id;
-  const date = req.query.date; // optional
-  const status = req.query.status; // optional — defaults to 'free'
-  const params = [clubId];
-  let sql = `
-    SELECT s.*, t.name as terrain_name, t.sport_type, t.club_id
-    FROM slots s
-    JOIN terrains t ON s.terrain_id = t.id
-    WHERE t.club_id = ?
-  `;
-
-  // Never surface past days to the booking UI.
-  sql += ' AND s.date >= CURDATE()';
-
-  if(date){ sql += ' AND DATE(s.date) = ?'; params.push(date); }
-
-  // Default to available slots only; pass status=all to disable.
-  const effectiveStatus = status || 'free';
-  if(effectiveStatus !== 'all'){
-    sql += ' AND s.status = ?';
-    params.push(effectiveStatus);
+    const weeksRaw = Object.prototype.hasOwnProperty.call(req.body, 'weeks') ? req.body.weeks : undefined;
+    const weeks = typeof weeksRaw !== 'undefined' ? Number(weeksRaw) : null;
+    const fromDate = req.body.fromDate || todayLocalYmd();
+    let toDate = req.body.toDate;
+    if (typeof toDate === 'undefined' || toDate === null) {
+      toDate = addDaysYmd(fromDate, (weeks !== null ? weeks : config.slots.defaultGenerationWeeks) * 7);
+    }
+    const r = await generateSlotsForTerrain(terrainId, fromDate, toDate);
+    res.json({ ok: true, terrainId, fromDate, toDate, inserted: r.inserted });
   }
 
-  sql += ' ORDER BY s.date, s.start_time, t.name';
-  const [rows] = await pool.query(sql, params);
-  console.log(`✅ [listSlotsByClub] ${rows.length} slots retournés`);
-  if (rows.length > 0) {
-    console.log('📅 Première date:', rows[0].date);
-    console.log('📅 Dernière date:', rows[rows.length - 1].date);
-  }
-  res.json(rows || []);
-}
+  async function adminGenerateSlotsForClub(req, res) {
+    const clubId = Number(req.body.club_id);
+    if (!Number.isFinite(clubId)) throw new ValidationError('club_id requis');
+    if (Number(req.user.club_id) !== clubId) throw new ForbiddenError();
 
-async function bookSlot(req, res){
-  const slotId = req.params.id;
-  // SECURITY: never trust user_id from request body. Always use authenticated user.
-  const userId = req.user && req.user.id;
-  if(!userId) return res.status(401).json({ ok:false, error: 'authentication required' });
-  const conn = await db.getConnection && await db.getConnection();
-  try{
-    if(conn){
+    const weeksRaw = Object.prototype.hasOwnProperty.call(req.body, 'weeks') ? req.body.weeks : undefined;
+    const weeks = typeof weeksRaw !== 'undefined' ? Number(weeksRaw) : null;
+    const fromDate = req.body.fromDate || todayLocalYmd();
+    let toDate = req.body.toDate;
+    if (typeof toDate === 'undefined' || toDate === null) {
+      toDate = addDaysYmd(fromDate, (weeks !== null ? weeks : config.slots.defaultGenerationWeeks) * 7);
+    }
+
+    const terrains = await queryPromise(db, 'SELECT id FROM `terrains` WHERE club_id = ?', [clubId]);
+    let totalInserted = 0;
+    for (const t of terrains) {
+      const r = await generateSlotsForTerrain(t.id, fromDate, toDate);
+      totalInserted += r.inserted || 0;
+    }
+    res.json({ ok: true, clubId, fromDate, toDate, totalInserted, terrains: terrains.map((t) => t.id) });
+  }
+
+  async function listSlots(req, res) {
+    const terrainId = Number(req.params.id);
+    if (!Number.isFinite(terrainId)) throw new ValidationError('id invalide');
+    const { date, status } = req.query;
+    const params = [terrainId];
+    let sql = `
+      SELECT s.*, t.name AS terrain_name, t.sport_type, t.club_id
+      FROM slots s
+      JOIN terrains t ON s.terrain_id = t.id
+      WHERE s.terrain_id = ?
+        AND s.date >= CURDATE()
+    `;
+    if (date) { sql += ' AND DATE(s.date) = ?'; params.push(date); }
+    if (status) { sql += ' AND s.status = ?'; params.push(status); }
+    sql += ' ORDER BY s.date, s.start_time';
+    const rows = await queryPromise(db, sql, params);
+    res.json(rows);
+  }
+
+  async function listSlotsByClub(req, res) {
+    const clubId = Number(req.params.id);
+    if (!Number.isFinite(clubId)) throw new ValidationError('id invalide');
+    const { date, status } = req.query;
+    const params = [clubId];
+    let sql = `
+      SELECT s.*, t.name AS terrain_name, t.sport_type, t.club_id
+      FROM slots s
+      JOIN terrains t ON s.terrain_id = t.id
+      WHERE t.club_id = ?
+        AND s.date >= CURDATE()
+    `;
+    if (date) { sql += ' AND DATE(s.date) = ?'; params.push(date); }
+    const effectiveStatus = status || 'free';
+    if (effectiveStatus !== 'all') { sql += ' AND s.status = ?'; params.push(effectiveStatus); }
+    sql += ' ORDER BY s.date, s.start_time, t.name';
+    const rows = await queryPromise(db, sql, params);
+    logger.debug(`listSlotsByClub club=${clubId} rows=${rows.length}`);
+    res.json(rows);
+  }
+
+  async function bookSlot(req, res) {
+    // Cette route crée une réservation confirmée SANS paiement : n'importe quel
+    // joueur connecté pouvait réserver gratuitement (et fixer son propre prix).
+    // Le parcours normal passe par Stripe Checkout (payments/create-checkout-session).
+    if (!config.allowDirectBooking) {
+      throw new ForbiddenError('La réservation directe est désactivée : utilisez le paiement en ligne.');
+    }
+    const slotId = Number(req.params.id);
+    if (!Number.isFinite(slotId)) throw new ValidationError('id invalide');
+    const userId = req.user && req.user.id;
+    if (!userId) throw new AppError('authentication required', 401);
+
+    const conn = await pool.getConnection();
+    try {
       await conn.beginTransaction();
-  const [srows] = await conn.query('SELECT status, date, start_time, end_time, terrain_id FROM slots WHERE id = ? FOR UPDATE', [slotId]);
-  const row = srows && srows[0];
-      if(!row) throw new Error('slot not found');
-      if(row.status !== 'free') throw new Error('slot not available');
 
-  const [cols] = await conn.query('SHOW COLUMNS FROM reservations');
-  const colNames = (cols || []).map(c => c.Field);
-  const colTypeMap = (cols || []).reduce((m, c) => { m[c.Field] = c.Type; return m; }, {});
-  const insertCols = [];
-  const insertVals = [];
+      const [srows] = await conn.query(
+        `SELECT s.status, s.date, s.start_time, s.end_time, s.terrain_id, t.price_per_hour
+         FROM slots s JOIN terrains t ON t.id = s.terrain_id
+         WHERE s.id = ? FOR UPDATE OF s`,
+        [slotId],
+      );
+      const row = srows && srows[0];
+      if (!row) throw new NotFoundError('Créneau introuvable');
+      if (row.status !== 'free') throw new ConflictError('Créneau non disponible');
 
-  if (colNames.includes('user_id')) { insertCols.push('user_id'); insertVals.push(userId); }
-  if (colNames.includes('status')) { insertCols.push('status'); insertVals.push('confirmed'); }
-  if (colNames.includes('date')) {
-    let dateVal = formatDatePart(row.date) || row.date;
-    const t = (colTypeMap['date'] || '').toLowerCase();
-    if (t.includes('datetime') || t.includes('timestamp')) {
-      const dpart = formatDatePart(row.date) || '';
-      dateVal = dpart + ' ' + (row.start_time || '00:00:00');
-    }
-    insertCols.push('date'); insertVals.push(dateVal);
-  }
-  if (colNames.includes('start_time')) {
-    let stVal = row.start_time;
-    const t = (colTypeMap['start_time'] || '').toLowerCase();
-    if ((t.includes('datetime') || t.includes('timestamp')) && row.date) {
-      const dpart = formatDatePart(row.date) || '';
-      stVal = dpart + ' ' + (row.start_time || '00:00:00');
-    }
-    insertCols.push('start_time'); insertVals.push(stVal);
-  }
-  if (colNames.includes('end_time')) {
-    let enVal = row.end_time;
-    const t = (colTypeMap['end_time'] || '').toLowerCase();
-    if ((t.includes('datetime') || t.includes('timestamp')) && row.date) {
-      const dpart = formatDatePart(row.date) || '';
-      enVal = dpart + ' ' + (row.end_time || '00:00:00');
-    }
-    insertCols.push('end_time'); insertVals.push(enVal);
-  }
-      let reservationId = null; // Initialize reservationId
+      // Prix = tarif du terrain × durée du créneau, jamais une valeur du client.
+      const hours = (timeToMinutes(row.end_time) - timeToMinutes(row.start_time)) / 60;
+      const price = Math.round(Number(row.price_per_hour) * hours * 100) / 100;
+      const day = formatLocalYmd(row.date);
 
-      // prefer price from request body (front) to avoid mismatch; fallback to computedPrice
-      let computedPrice = null;
-      try {
-        // if front sent a price, use it
-        if (req.body && typeof req.body.price !== 'undefined' && req.body.price !== null) {
-          computedPrice = Math.round(Number(req.body.price || 0) * 100) / 100;
-        } else {
-          const [tinfoRows] = await conn.query('SELECT price_per_hour, price, slot_price FROM `terrains` WHERE id = ?', [row.terrain_id]);
-          const tinfo = (tinfoRows && tinfoRows[0]) ? tinfoRows[0] : null;
-          const pph = tinfo ? (tinfo.price_per_hour ?? tinfo.price ?? tinfo.slot_price ?? 0) : 0;
-          computedPrice = Math.round(Number(pph || 0) * 100) / 100;
-        }
-      } catch (e) {
-        computedPrice = Math.round(Number(req.body && req.body.price || 0) * 100) / 100;
-      }
-      if (colNames.includes('price')) { insertCols.push('price'); insertVals.push(computedPrice); }
-        // perform insert for reservation now that insertCols/insertVals are ready
-        if (insertCols.length === 0) throw new Error('No insertable columns found for reservations');
-        const placeholders = insertCols.map(()=>'?').join(', ');
-    const sqlInsert = `INSERT INTO reservations (${insertCols.join(',')}) VALUES (${placeholders})`;
-    // debug log: show what we insert for reservations
-    try { console.log('reservations INSERT (tx): cols=', insertCols, 'vals=', insertVals); } catch(e){}
-    const [rres] = await conn.query(sqlInsert, insertVals);
-        reservationId = (rres && (rres.insertId || rres.insert_id)) ? (rres.insertId || rres.insert_id) : null;
-        if(!reservationId) throw new Error('cannot create reservation');
+      const [rres] = await conn.query(
+        'INSERT INTO reservations (user_id, terrain_id, start_time, end_time, price, status) VALUES (?, ?, ?, ?, ?, ?)',
+        [userId, row.terrain_id, `${day} ${row.start_time}`, `${day} ${row.end_time}`, price, 'confirmed'],
+      );
+      const reservationId = rres && (rres.insertId || rres.insert_id);
+      if (!reservationId) throw new AppError('Impossible de créer la réservation', 500);
 
-        await conn.query('UPDATE slots SET status = ?, reservation_id = ? WHERE id = ?', ['booked', reservationId, slotId]);
-        await conn.commit();
-        res.json({ ok: true, reservationId });
-    } else {
-  const [srows] = await pool.query('SELECT status, date, start_time, end_time, terrain_id FROM slots WHERE id = ?', [slotId]);
-  const row = srows && srows[0];
-      if(!row) throw new Error('slot not found');
-      if(row.status !== 'free') throw new Error('slot not available');
-
-  const slotDate = row.date;
-  const slotStart = row.start_time;
-  const slotEnd = row.end_time;
-  const terrainId = row.terrain_id;
-
-  const [cols2] = await pool.query('SHOW COLUMNS FROM reservations');
-  const colNames2 = (cols2 || []).map(c => c.Field);
-  const colTypeMap2 = (cols2 || []).reduce((m, c) => { m[c.Field] = c.Type; return m; }, {});
-  const insertCols2 = [];
-  const insertVals2 = [];
-  if (colNames2.includes('user_id')) { insertCols2.push('user_id'); insertVals2.push(userId); }
-  if (colNames2.includes('status')) { insertCols2.push('status'); insertVals2.push('confirmed'); }
-  if (colNames2.includes('date')) {
-    let dval = formatDatePart(slotDate) || slotDate;
-    const t = (colTypeMap2['date'] || '').toLowerCase();
-    if (t.includes('datetime') || t.includes('timestamp')) dval = (formatDatePart(slotDate) || '') + ' ' + (slotStart || '00:00:00');
-    insertCols2.push('date'); insertVals2.push(dval);
-  }
-  if (colNames2.includes('start_time')) {
-    let sVal = slotStart;
-    const t = (colTypeMap2['start_time'] || '').toLowerCase();
-    if (t.includes('datetime') || t.includes('timestamp')) sVal = (formatDatePart(slotDate) || '') + ' ' + (slotStart || '00:00:00');
-    insertCols2.push('start_time'); insertVals2.push(sVal);
-  }
-  if (colNames2.includes('end_time')) {
-    let eVal = slotEnd;
-    const t = (colTypeMap2['end_time'] || '').toLowerCase();
-    if (t.includes('datetime') || t.includes('timestamp')) eVal = (formatDatePart(slotDate) || '') + ' ' + (slotEnd || '00:00:00');
-    insertCols2.push('end_time'); insertVals2.push(eVal);
-  }
-  if (colNames2.includes('terrain_id')) { insertCols2.push('terrain_id'); insertVals2.push(terrainId); }
-  if (colNames2.includes('created_at')) { insertCols2.push('created_at'); insertVals2.push(new Date().toISOString().slice(0,19).replace('T',' ')); }
-  // prefer price from request body, else compute from terrain
-  let computedPrice2 = null;
-  try {
-    if (req.body && typeof req.body.price !== 'undefined' && req.body.price !== null) {
-      computedPrice2 = Math.round(Number(req.body.price || 0) * 100) / 100;
-    } else {
-      const [tinfoRows2] = await pool.query('SELECT price_per_hour, price, slot_price FROM `terrains` WHERE id = ?', [terrainId]);
-      const tinfo2 = (tinfoRows2 && tinfoRows2[0]) ? tinfoRows2[0] : null;
-      const pph2 = tinfo2 ? (tinfo2.price_per_hour ?? tinfo2.price ?? tinfo2.slot_price ?? 0) : 0;
-      computedPrice2 = Math.round(Number(pph2 || 0) * 100) / 100;
-    }
-  } catch (e) {
-    computedPrice2 = Math.round(Number(req.body && req.body.price || 0) * 100) / 100;
-  }
-  if (colNames2.includes('price')) { insertCols2.push('price'); insertVals2.push(computedPrice2); }
-  if (insertCols2.length === 0) throw new Error('No insertable columns found for reservations');
-  const placeholders2 = insertCols2.map(()=>'?').join(', ');
-  const sql2 = `INSERT INTO reservations (${insertCols2.join(',')}) VALUES (${placeholders2})`;
-  // debug log: show what we insert for reservations (non-tx)
-  try { console.log('reservations INSERT: cols=', insertCols2, 'vals=', insertVals2); } catch(e){}
-  const [rres] = await pool.query(sql2, insertVals2);
-  const reservationId = (rres && (rres.insertId || rres.insert_id)) ? (rres.insertId || rres.insert_id) : null;
-  if(!reservationId) throw new Error('cannot create reservation');
-
-      await pool.query('UPDATE slots SET status = ?, reservation_id = ? WHERE id = ?', ['booked', reservationId, slotId]);
+      await conn.query(
+        'UPDATE slots SET status = ?, reservation_id = ? WHERE id = ?',
+        ['booked', reservationId, slotId],
+      );
+      await conn.commit();
       res.json({ ok: true, reservationId });
+    } catch (err) {
+      try { await conn.rollback(); } catch (rbErr) { logger.error(`bookSlot rollback failed: ${rbErr.message}`); }
+      throw err;
+    } finally {
+      conn.release();
     }
-  }catch(err){
-    if(conn) await conn.rollback();
-    res.status(400).json({ ok:false, error: err.message });
-  }finally{
-    if(conn && conn.release) conn.release();
-  }
-}
-
-// POST /reservations/:id/cancel
-async function cancelReservation(req, res){
-  const reservationId = Number(req.params.id);
-  if (!Number.isFinite(reservationId)) return res.status(400).json({ ok:false, error:'id invalide' });
-  const userId = req.user && req.user.id;
-  if(!userId) return res.status(401).json({ ok:false, error:'authentication required' });
-
-  // NB: the slot->reservation link lives on slots.reservation_id (reservations
-  // has no slot_id column) — free the slot through that reverse link.
-  const [rrows] = await pool.query('SELECT id, status, user_id, terrain_id FROM reservations WHERE id = ?', [reservationId]);
-  const row = rrows && rrows[0];
-  if(!row) return res.status(404).json({ ok:false, error:'reservation not found' });
-
-  // Only the reservation owner OR the club admin of the terrain's club may cancel.
-  const isOwner = Number(row.user_id) === Number(userId);
-  let isClubAdmin = false;
-  if (req.user.role === 'club_admin' && req.user.club_id) {
-    const [trows] = await pool.query('SELECT club_id FROM terrains WHERE id = ?', [row.terrain_id]);
-    isClubAdmin = trows && trows[0] && Number(trows[0].club_id) === Number(req.user.club_id);
-  }
-  if (!isOwner && !isClubAdmin) return res.status(403).json({ ok:false, error:'forbidden' });
-
-  if(row.status !== 'active' && row.status !== 'confirmed') return res.status(400).json({ ok:false, error:'cannot cancel' });
-
-  await pool.query('UPDATE reservations SET status = ? WHERE id = ?', ['cancelled', reservationId]);
-  await pool.query('UPDATE slots SET status = ?, reservation_id = NULL WHERE reservation_id = ?', ['free', reservationId]);
-  res.json({ ok:true });
-}
-
-// DELETE /admin/slots/cleanup — scoped to caller's club only.
-async function adminCleanupSlots(req, res){
-  const adminClubId = req.user && req.user.club_id;
-  if (!adminClubId) return res.status(403).json({ error: 'club admin scope required' });
-  const keepDays = Number(req.body.keepDays || 30);
-  if (!Number.isFinite(keepDays) || keepDays < 1 || keepDays > 3650) {
-    return res.status(400).json({ error: 'keepDays invalide (1-3650)' });
-  }
-  const cutoff = new Date(Date.now() - keepDays*24*60*60*1000).toISOString().slice(0,10);
-  await pool.query('DELETE FROM slots WHERE date < ? AND club_id = ?', [cutoff, adminClubId]);
-  res.json({ ok:true, cutoff });
-}
-
-// Admin: remove duplicate slots within caller's club only.
-async function adminRemoveDuplicateSlots(req, res){
-  const adminClubId = req.user && req.user.club_id;
-  if (!adminClubId) return res.status(403).json({ error: 'club admin scope required' });
-  const sql = `
-    DELETE s1 FROM slots s1
-    INNER JOIN slots s2
-      ON s1.terrain_id = s2.terrain_id
-      AND s1.date = s2.date
-      AND s1.start_time = s2.start_time
-      AND s1.id > s2.id
-    WHERE s1.club_id = ?
-  `;
-  const [result] = await pool.query(sql, [adminClubId]);
-  const deleted = result?.affectedRows ?? 0;
-  res.json({ ok:true, deleted });
-}
-
-// Admin: wipe slots of caller's club only — never the entire table.
-async function adminTruncateSlots(req, res){
-  const adminClubId = req.user && req.user.club_id;
-  if (!adminClubId) return res.status(403).json({ error: 'club admin scope required' });
-  const [result] = await pool.query('DELETE FROM slots WHERE club_id = ?', [adminClubId]);
-  res.json({ ok:true, deleted: result?.affectedRows ?? 0 });
-}
-
-// POST /admin/slots/block — club admin blocks a slot (maintenance, private use).
-// Marks an existing free slot 'blocked', or inserts a blocked slot if none exists.
-async function adminBlockSlot(req, res){
-  const adminClubId = req.user && req.user.club_id;
-  if (!adminClubId) return res.status(403).json({ error: 'club admin scope required' });
-  const terrainId = Number(req.body.terrain_id);
-  const date = req.body.date;
-  const startTime = req.body.start_time;
-  const endTime = req.body.end_time;
-  if (!Number.isFinite(terrainId) || !/^\d{4}-\d{2}-\d{2}$/.test(String(date)) || !/^\d{2}:\d{2}/.test(String(startTime))) {
-    return res.status(400).json({ error: 'terrain_id, date, start_time requis' });
   }
 
-  // Terrain must belong to the caller's club.
-  const [trows] = await pool.query('SELECT club_id FROM terrains WHERE id = ?', [terrainId]);
-  if (!trows.length || Number(trows[0].club_id) !== Number(adminClubId)) {
-    return res.status(403).json({ error: 'forbidden' });
+  async function cancelReservation(req, res) {
+    const reservationId = Number(req.params.id);
+    if (!Number.isFinite(reservationId)) throw new ValidationError('id invalide');
+    const userId = req.user && req.user.id;
+    if (!userId) throw new AppError('authentication required', 401);
+
+    const row = await queryOne(db, 'SELECT id, status, user_id, terrain_id FROM reservations WHERE id = ?', [reservationId]);
+    if (!row) throw new NotFoundError('Réservation introuvable');
+
+    const isOwner = Number(row.user_id) === Number(userId);
+    let isClubAdmin = false;
+    if (req.user.role === 'club_admin' && req.user.club_id) {
+      const t = await queryOne(db, 'SELECT club_id FROM terrains WHERE id = ?', [row.terrain_id]);
+      isClubAdmin = t && Number(t.club_id) === Number(req.user.club_id);
+    }
+    if (!isOwner && !isClubAdmin) throw new ForbiddenError();
+    if (row.status !== 'active' && row.status !== 'confirmed') throw new ConflictError('Annulation impossible');
+
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      await conn.query('UPDATE reservations SET status = ? WHERE id = ?', ['cancelled', reservationId]);
+      await conn.query('UPDATE slots SET status = ?, reservation_id = NULL WHERE reservation_id = ?', ['free', reservationId]);
+      await conn.commit();
+      res.json({ ok: true });
+    } catch (err) {
+      try { await conn.rollback(); } catch (rbErr) { logger.error(`cancelReservation rollback failed: ${rbErr.message}`); }
+      throw err;
+    } finally {
+      conn.release();
+    }
   }
 
-  const start = String(startTime).slice(0, 5) + ':00';
-  const end = endTime ? String(endTime).slice(0, 5) + ':00' : null;
-
-  const [existing] = await pool.query(
-    'SELECT id, status FROM slots WHERE terrain_id = ? AND date = ? AND start_time = ? LIMIT 1',
-    [terrainId, date, start]
-  );
-  if (existing.length) {
-    if (existing[0].status === 'booked') return res.status(409).json({ error: 'Ce créneau est déjà réservé' });
-    await pool.query("UPDATE slots SET status = 'blocked' WHERE id = ?", [existing[0].id]);
-    return res.json({ ok: true, slot_id: existing[0].id, blocked: true });
+  async function adminCleanupSlots(req, res) {
+    const adminClubId = req.user && req.user.club_id;
+    if (!adminClubId) throw new ForbiddenError('club admin scope required');
+    const keepDays = Number(req.body.keepDays || config.slots.cleanupDefaultKeepDays);
+    if (!Number.isFinite(keepDays) || keepDays < 1 || keepDays > 3650) {
+      throw new ValidationError('keepDays invalide (1-3650)');
+    }
+    const cutoff = addDaysYmd(todayLocalYmd(), -keepDays);
+    // Les créneaux réservés portent l'historique (réservations, exports compta) : jamais purgés ici.
+    await queryPromise(db, "DELETE FROM slots WHERE date < ? AND club_id = ? AND status <> 'booked'", [cutoff, adminClubId]);
+    res.json({ ok: true, cutoff });
   }
-  const [ins] = await pool.query(
-    "INSERT INTO slots (terrain_id, club_id, date, start_time, end_time, status) VALUES (?, ?, ?, ?, ?, 'blocked')",
-    [terrainId, adminClubId, date, start, end || start]
-  );
-  res.status(201).json({ ok: true, slot_id: ins.insertId, blocked: true });
-}
 
-// DELETE /admin/slots/:id/block — free a blocked slot again.
-async function adminUnblockSlot(req, res){
-  const adminClubId = req.user && req.user.club_id;
-  if (!adminClubId) return res.status(403).json({ error: 'club admin scope required' });
-  const slotId = Number(req.params.id);
-  if (!Number.isFinite(slotId)) return res.status(400).json({ error: 'id invalide' });
-  const [rows] = await pool.query('SELECT club_id, status FROM slots WHERE id = ?', [slotId]);
-  if (!rows.length || Number(rows[0].club_id) !== Number(adminClubId)) {
-    return res.status(403).json({ error: 'forbidden' });
+  async function adminRemoveDuplicateSlots(req, res) {
+    const adminClubId = req.user && req.user.club_id;
+    if (!adminClubId) throw new ForbiddenError('club admin scope required');
+    const result = await queryPromise(db, `
+      DELETE s1 FROM slots s1
+      INNER JOIN slots s2
+        ON s1.terrain_id = s2.terrain_id
+        AND s1.date = s2.date
+        AND s1.start_time = s2.start_time
+        AND s1.id > s2.id
+      WHERE s1.club_id = ?
+    `, [adminClubId]);
+    res.json({ ok: true, deleted: result?.affectedRows ?? 0 });
   }
-  if (rows[0].status !== 'blocked') return res.status(400).json({ error: 'Ce créneau n\'est pas bloqué' });
-  await pool.query("UPDATE slots SET status = 'free' WHERE id = ?", [slotId]);
-  res.json({ ok: true, freed: true });
-}
 
-// GET /clubs/:id/occupancy — fill rate per day over the next 7 days.
-async function clubOccupancy(req, res){
-  const clubId = Number(req.params.id);
-  if (!Number.isFinite(clubId)) return res.status(400).json({ error: 'club_id invalide' });
-  const [rows] = await pool.query(`
-    SELECT DATE_FORMAT(s.date, '%Y-%m-%d') AS day,
-           COUNT(*) AS total,
-           SUM(s.status = 'booked') AS booked
-    FROM slots s
-    JOIN terrains t ON t.id = s.terrain_id
-    WHERE t.club_id = ?
-      AND s.date >= CURDATE()
-      AND s.date < DATE_ADD(CURDATE(), INTERVAL 7 DAY)
-    GROUP BY DATE(s.date)
-    ORDER BY day
-  `, [clubId]);
-  res.json(rows.map(r => ({
-    day: r.day,
-    total: Number(r.total),
-    booked: Number(r.booked || 0),
-    rate: Number(r.total) > 0 ? Math.round((Number(r.booked || 0) / Number(r.total)) * 100) : 0,
-  })));
-}
+  async function adminTruncateSlots(req, res) {
+    const adminClubId = req.user && req.user.club_id;
+    if (!adminClubId) throw new ForbiddenError('club admin scope required');
+    // Les créneaux réservés ou tenus par une annonce ne se suppriment pas : on orphelinerait des clients qui ont payé.
+    const result = await queryPromise(db, "DELETE FROM slots WHERE club_id = ? AND status IN ('free', 'blocked')", [adminClubId]);
+    res.json({ ok: true, deleted: result?.affectedRows ?? 0 });
+  }
+
+  async function adminBlockSlot(req, res) {
+    const adminClubId = req.user && req.user.club_id;
+    if (!adminClubId) throw new ForbiddenError('club admin scope required');
+    const terrainId = Number(req.body.terrain_id);
+    const date = req.body.date;
+    const startTime = req.body.start_time;
+    const endTime = req.body.end_time;
+    if (!Number.isFinite(terrainId) || !/^\d{4}-\d{2}-\d{2}$/.test(String(date)) || !/^\d{2}:\d{2}/.test(String(startTime))) {
+      throw new ValidationError('terrain_id, date, start_time requis');
+    }
+
+    const t = await queryOne(db, 'SELECT club_id FROM terrains WHERE id = ?', [terrainId]);
+    if (!t || Number(t.club_id) !== Number(adminClubId)) throw new ForbiddenError();
+
+    const start = String(startTime).slice(0, 5) + ':00';
+    const end = endTime ? String(endTime).slice(0, 5) + ':00' : null;
+
+    const existing = await queryOne(
+      db,
+      'SELECT id, status FROM slots WHERE terrain_id = ? AND date = ? AND start_time = ? LIMIT 1',
+      [terrainId, date, start],
+    );
+    if (existing) {
+      if (existing.status === 'booked') throw new ConflictError('Ce créneau est déjà réservé');
+      await queryPromise(db, "UPDATE slots SET status = 'blocked' WHERE id = ?", [existing.id]);
+      return res.json({ ok: true, slot_id: existing.id, blocked: true });
+    }
+    const result = await queryPromise(
+      db,
+      "INSERT INTO slots (terrain_id, club_id, date, start_time, end_time, status) VALUES (?, ?, ?, ?, ?, 'blocked')",
+      [terrainId, adminClubId, date, start, end || start],
+    );
+    res.status(201).json({ ok: true, slot_id: result.insertId, blocked: true });
+  }
+
+  async function adminUnblockSlot(req, res) {
+    const adminClubId = req.user && req.user.club_id;
+    if (!adminClubId) throw new ForbiddenError('club admin scope required');
+    const slotId = Number(req.params.id);
+    if (!Number.isFinite(slotId)) throw new ValidationError('id invalide');
+    const row = await queryOne(db, 'SELECT club_id, status FROM slots WHERE id = ?', [slotId]);
+    if (!row || Number(row.club_id) !== Number(adminClubId)) throw new ForbiddenError();
+    if (row.status !== 'blocked') throw new ValidationError("Ce créneau n'est pas bloqué");
+    await queryPromise(db, "UPDATE slots SET status = 'free' WHERE id = ?", [slotId]);
+    res.json({ ok: true, freed: true });
+  }
+
+  async function clubOccupancy(req, res) {
+    const clubId = Number(req.params.id);
+    if (!Number.isFinite(clubId)) throw new ValidationError('club_id invalide');
+    const rows = await queryPromise(db, `
+      SELECT DATE_FORMAT(s.date, '%Y-%m-%d') AS day,
+             COUNT(*) AS total,
+             SUM(s.status = 'booked') AS booked
+      FROM slots s
+      JOIN terrains t ON t.id = s.terrain_id
+      WHERE t.club_id = ?
+        AND s.date >= CURDATE()
+        AND s.date < DATE_ADD(CURDATE(), INTERVAL 7 DAY)
+      GROUP BY DATE(s.date)
+      ORDER BY day
+    `, [clubId]);
+    res.json(rows.map((r) => ({
+      day: r.day,
+      total: Number(r.total),
+      booked: Number(r.booked || 0),
+      rate: Number(r.total) > 0 ? Math.round((Number(r.booked || 0) / Number(r.total)) * 100) : 0,
+    })));
+  }
 
   return {
     adminGenerateSlots,

@@ -1,7 +1,8 @@
 const { logger } = require('../utils/logger');
+const { poolOf } = require('../utils/dbHelpers');
 
 module.exports = function(db) {
-  const pool = (db && typeof db.promise === 'function') ? db.promise() : db;
+  const pool = poolOf(db);
 
   // GET /clubs/:id/finances?period=day|week|month|year|total&date=YYYY-MM-DD
   async function getClubFinances(req, res) {
@@ -207,9 +208,12 @@ module.exports = function(db) {
       `, [clubId, from, to]);
 
       const commissionRate = 0.10;
+      // Le nom du client est choisi par le joueur : une cellule commençant par
+      // = + - @ serait exécutée comme formule chez le gérant à l'ouverture dans Excel.
       const esc = (v) => {
-        const s = String(v ?? '');
-        return /[",;\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+        const raw = String(v ?? '');
+        const s = /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
+        return /[",;\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
       };
       const header = ['Date', 'Debut', 'Fin', 'Terrain', 'Client', 'Montant', 'Commission', 'Net'];
       const lines = [header.join(';')];
