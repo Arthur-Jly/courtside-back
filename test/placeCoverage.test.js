@@ -162,7 +162,9 @@ test('BK-PC-09 un terrain vérifié à la main n’est jamais réécrit par le c
 
   assert.equal(await coverage.ensure(48.85, 2.35), 'fetched');
   assert.equal(callsTo(db, /INSERT INTO public_places/).length, 0);
-  assert.equal(callsTo(db, /UPDATE public_places/).length, 0);
+  assert.equal(callsTo(db, /UPDATE public_places SET name/).length, 0);
+  // Le masquage des absents exclut lui aussi les terrains curés à la main.
+  for (const c of callsTo(db, /SET source_missing_at = NOW\(\)/)) assert.match(c.sql, /NOT IN \('manually_curated'/);
 });
 
 // ── Câblage sur la recherche ────────────────────────────────────────────────
@@ -187,4 +189,28 @@ test('BK-PC-10 GET /public-places?lat&lng charge la zone avant de répondre ; sa
     await fetch(`${url}/api/public-places?city=Paris`);
     assert.equal(seen.length, 1, 'recherche par ville : pas de chargement');
   } finally { server.close(); }
+});
+
+test('BK-PP-35 rafraîchissement : les terrains absents de Data ES sont masqués (source_missing_at), pas supprimés', async () => {
+  const db = makeDb();
+  const coverage = createPlaceCoverage(db, {
+    fetchPage: async () => ({ total_count: 2, results: [record(1), record(2)] }),
+  });
+  assert.equal(await coverage.ensure(48.85, 2.35), 'fetched');
+  const mark = callsTo(db, /SET source_missing_at = NOW\(\)/);
+  assert.equal(mark.length, 1);
+  assert.match(mark[0].sql, /source = 'data_es'/);
+  assert.match(mark[0].sql, /NOT IN \('manually_curated', 'community_verified'\)/);
+  assert.match(mark[0].sql, /external_ref NOT IN \(\?\)/);
+  assert.deepEqual(mark[0].params.at(-1), ['A1', 'A2'], 'les terrains retenus restent visibles');
+  assert.equal(callsTo(db, /DELETE FROM public_places/).length, 0);
+});
+
+test('BK-PP-36 lecture Data ES tronquée (zone trop dense) : on ne masque rien', async () => {
+  const db = makeDb();
+  const coverage = createPlaceCoverage(db, {
+    fetchPage: async () => ({ total_count: 99999, results: [record(1)] }),
+  });
+  assert.equal(await coverage.ensure(48.85, 2.35), 'fetched');
+  assert.equal(callsTo(db, /SET source_missing_at = NOW\(\)/).length, 0);
 });

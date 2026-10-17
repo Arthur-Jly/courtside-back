@@ -21,12 +21,16 @@
 const { queryPromise, queryOne } = require('../utils/dbHelpers');
 const { logger } = require('../utils/logger');
 const dataEs = require('./dataEs');
+const { bboxAround } = require('../utils/geo');
 
 const CELLS_PER_DEGREE = 10;          // cellule = 0,1° ≈ 11 km
 const FETCH_RADIUS_KM = 25;           // > rayon de recherche (15) + demi-cellule
 const MIN_LOCAL_PLACES = 10;          // au-delà, la zone est déjà bien fournie
 const REFRESH_DAYS = 30;
 const MAX_PAGES = 15;                 // 1 500 équipements : Paris en compte ~1 400
+// Les absents ne sont cherchés qu'un peu en deçà du rayon interrogé : en bord
+// de cercle, Data ES et notre haversine peuvent diverger de quelques mètres.
+const MISSING_RADIUS_KM = FETCH_RADIUS_KM - 0.5;
 const PARALLEL_PAGES = 5;
 const HOURLY_BUDGET = 60;
 
@@ -54,7 +58,8 @@ function createPlaceCoverage(db, { fetchPage = dataEs.fetchPage, now = Date.now 
     const results = [...(first.results || [])];
     const total = Number(first.total_count) || results.length;
     const pages = Math.min(Math.ceil(total / dataEs.PAGE_SIZE), MAX_PAGES);
-    if (total > MAX_PAGES * dataEs.PAGE_SIZE) {
+    const truncated = total > MAX_PAGES * dataEs.PAGE_SIZE;
+    if (truncated) {
       logger.warn(`placeCoverage: ${total} équipements, seuls ${MAX_PAGES * dataEs.PAGE_SIZE} sont lus`);
     }
     const offsets = [];
@@ -63,11 +68,39 @@ function createPlaceCoverage(db, { fetchPage = dataEs.fetchPage, now = Date.now 
       const batch = await Promise.all(offsets.slice(i, i + PARALLEL_PAGES).map(o => fetchPage(where, o)));
       for (const page of batch) results.push(...(page.results || []));
     }
-    return results;
+    return { results, truncated };
+  }
+
+  /**
+   * Terrains de la zone qui ne ressortent plus de Data ES (équipement retiré, ou
+   * devenu non éligible) : masqués via `source_missing_at`, jamais supprimés —
+   * des parties et des signalements s'y rattachent. Un terrain vérifié par un
+   * humain ou confirmé par des joueurs n'est pas touché.
+   */
+  async function markMissing(lat, lng, keptRefs) {
+    const box = bboxAround(lat, lng, MISSING_RADIUS_KM);
+    const notIn = keptRefs.length ? 'AND external_ref NOT IN (?)' : '';
+    const res = await q(`
+      UPDATE public_places
+      SET source_missing_at = NOW()
+      WHERE source = 'data_es'
+        AND source_missing_at IS NULL
+        AND verification_status NOT IN ('manually_curated', 'community_verified')
+        AND lat BETWEEN ? AND ? AND lng BETWEEN ? AND ?
+        AND 6371 * ACOS(LEAST(1,
+              COS(RADIANS(?)) * COS(RADIANS(lat)) * COS(RADIANS(lng) - RADIANS(?))
+              + SIN(RADIANS(?)) * SIN(RADIANS(lat)))) <= ?
+        ${notIn}
+    `, [
+      box.south, box.north, box.west, box.east,
+      lat, lng, lat, MISSING_RADIUS_KM,
+      ...(keptRefs.length ? [keptRefs] : []),
+    ]);
+    return res?.affectedRows || 0;
   }
 
   async function load(lat, lng, cellLat, cellLng) {
-    const results = await fetchAll(dataEs.buildGeoWhere(lat, lng, FETCH_RADIUS_KM));
+    const { results, truncated } = await fetchAll(dataEs.buildGeoWhere(lat, lng, FETCH_RADIUS_KM));
     const rows = [];
     const seen = new Set();
     for (const r of results) {
@@ -76,6 +109,8 @@ function createPlaceCoverage(db, { fetchPage = dataEs.fetchPage, now = Date.now 
       rows.push(dataEs.toRow(r));
     }
     const counts = await dataEs.upsertPlaces(q, rows);
+    // Lecture incomplète (zone trop dense) : on ne peut rien conclure des absents.
+    const missing = truncated ? 0 : await markMissing(lat, lng, rows.map(r => r.external_ref));
     // Enregistré seulement après un succès complet : un échec en cours de route
     // laisse la zone « non couverte » et sera retenté à la recherche suivante.
     await q(
@@ -84,7 +119,7 @@ function createPlaceCoverage(db, { fetchPage = dataEs.fetchPage, now = Date.now 
        ON DUPLICATE KEY UPDATE places_found = VALUES(places_found), fetched_at = NOW()`,
       [cellLat, cellLng, rows.length]
     );
-    logger.info(`placeCoverage: zone ${cellLat}/${cellLng} — ${results.length} lus, ${rows.length} retenus, ${counts.inserted} insérés, ${counts.updated} mis à jour`);
+    logger.info(`placeCoverage: zone ${cellLat}/${cellLng} — ${results.length} lus, ${rows.length} retenus, ${counts.inserted} insérés, ${counts.updated} mis à jour, ${missing} disparus`);
   }
 
   /**

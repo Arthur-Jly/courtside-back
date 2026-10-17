@@ -97,26 +97,29 @@ function parseArgs(argv) {
       if (offset % 1000 === 0) process.stdout.write(`  …${offset}/${total}\n`);
     }
 
-    // Purge : supprime les lieux du périmètre importé qui ne ressortent plus de
+    // Purge : masque les lieux du périmètre importé qui ne ressortent plus de
     // l'API (équipement retiré, ou devenu non éligible après correction d'un
-    // filtre). On ne touche jamais à un lieu vérifié par un humain, ni à un
-    // lieu ajouté par un utilisateur.
+    // filtre) — `source_missing_at`, comme le rafraîchissement à la demande.
+    // Jamais de DELETE : des parties et des signalements s'y rattachent. On ne
+    // touche ni à un lieu vérifié par un humain ou confirmé par des joueurs, ni
+    // à un lieu ajouté par un utilisateur.
     let pruned = 0;
     if (args.prune && !args.dry && seenRefs.size > 0 && seenDepartments.size > 0) {
       // Périmètre STRICT : uniquement les départements réellement parcourus.
-      // Sans ça, importer l'Isère supprimerait les terrains de toutes les
+      // Sans ça, importer l'Isère masquerait les terrains de toutes les
       // autres régions déjà en base.
       const deps = [...seenDepartments];
       const placeholders = deps.map(() => '?').join(',');
       const candidates = await q(
         `SELECT id, external_ref FROM public_places
-         WHERE source = 'data_es' AND verification_status = 'auto'
+         WHERE source = 'data_es' AND source_missing_at IS NULL
+           AND verification_status NOT IN ('manually_curated', 'community_verified')
            AND department IN (${placeholders})`,
         deps
       );
       const stale = candidates.filter(c => !seenRefs.has(c.external_ref));
       for (const s of stale) {
-        await q('DELETE FROM public_places WHERE id = ?', [s.id]);
+        await q('UPDATE public_places SET source_missing_at = NOW() WHERE id = ?', [s.id]);
         pruned++;
       }
     }
@@ -135,7 +138,7 @@ function parseArgs(argv) {
       console.log(`  insérés      : ${inserted}`);
       console.log(`  mis à jour   : ${updated}`);
       console.log(`  curés (gardés intacts) : ${skippedCurated}`);
-      if (args.prune) console.log(`  purgés (plus éligibles): ${pruned}`);
+      if (args.prune) console.log(`  masqués (plus dans Data ES): ${pruned}`);
     }
     console.log(`Rejetés        : ${read - kept}`);
     Object.entries(rejects).sort((a, b) => b[1] - a[1])
