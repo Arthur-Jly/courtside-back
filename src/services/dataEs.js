@@ -12,7 +12,6 @@
 
 const API = 'https://equipements.sports.gouv.fr/api/explore/v2.1/catalog/datasets/data-es/records';
 const PAGE_SIZE = 100;
-const MAX_AGE_YEARS = 3;
 
 // Liste blanche établie sur les facettes réelles de l'API (accès libre, foot ou
 // basket). C'est CE filtre qui écarte les boucles de randonnée, plans d'eau,
@@ -26,7 +25,8 @@ const TYPES_AUTORISES = new Set([
   'Terrain de basket-ball',
   'Terrain de basket-ball 3x3',
   'Terrain mixte',
-  'Salle multisports (gymnase)',
+  // Pas de « Salle multisports (gymnase) » : même marquée « accès libre », une
+  // salle est fermée à clé hors créneaux — on ne peut pas y organiser une partie.
 ]);
 
 // aps_name (Data ES) -> clés internes (src/data/courts.js)
@@ -41,13 +41,14 @@ const SPORTS_MAP = [
 const PROTECTED_STATUSES = ['manually_curated', 'community_verified', 'reported_invalid'];
 
 // L'API Data ES renvoie ses booléens tantôt en booléens, tantôt en chaînes
-// ("true"/"false") selon le champ et l'endpoint. On normalise.
+// ("true"/"false", et "Oui"/"Non" pour `inst_hs_bool`) selon le champ. On normalise.
 function bool(v) {
   if (v === true || v === 1) return true;
   if (v === false || v === 0) return false;
   if (typeof v === 'string') {
-    if (v.toLowerCase() === 'true') return true;
-    if (v.toLowerCase() === 'false') return false;
+    const t = v.trim().toLowerCase();
+    if (t === 'true' || t === 'oui') return true;
+    if (t === 'false' || t === 'non') return false;
   }
   return null;
 }
@@ -74,30 +75,28 @@ function mapSports(apsName) {
   return [...set];
 }
 
-/** Date plancher de mise à jour d'une fiche (YYYY-MM-DD). */
-function minUpdateDate(now = new Date()) {
-  const d = new Date(now);
-  d.setFullYear(d.getFullYear() - MAX_AGE_YEARS);
-  return d.toISOString().slice(0, 10);
-}
-
 /**
  * Couche 1 : filtres durs. Retourne null si le lieu est retenu, sinon le motif
  * de rejet (pour pouvoir ajuster les filtres au vu des statistiques).
+ *
+ * Pas de filtre sur `equip_maj_date` : c'est la date de l'export, pas celle de
+ * la fiche (93 % des équipements portent le même 2025-03-31). Un plancher
+ * d'ancienneté ne filtrait rien, puis aurait rejeté tout le référentiel d'un
+ * coup. L'existence réelle se vérifie par recoupement (BD TOPO, OSM).
  */
-function rejectReason(r, minDate) {
+function rejectReason(r) {
   // `equip_ouv_public_bool` n'est PAS un signal d'usage : c'est une notion
   // administrative (classement ERP). Des terrains de proximité municipaux
   // ouverts à tous y sont à "false". Le signal réel est `equip_utilisateur` :
   // on garde ce qui est ouvert aux individus, on écarte ce qui est réservé
   // aux clubs ou aux scolaires.
   if (!usableByIndividuals(r.equip_utilisateur)) return 'reserve_clubs_ou_scolaires';
-  if (bool(r.inst_hs_bool) === true || bool(r.equip_hs_bool) === true) return 'hors_service';
+  // `inst_hs_bool` est le seul indicateur « hors service » du jeu de données.
+  if (bool(r.inst_hs_bool) === true) return 'hors_service';
   if (!TYPES_AUTORISES.has(r.equip_type_name)) return 'type_hors_liste_blanche';
   if (!r.equip_coordonnees || r.equip_coordonnees.lat == null) return 'sans_coordonnees';
   if (!r.inst_adresse) return 'sans_adresse';
   if (!r.new_name) return 'sans_commune';
-  if (!r.equip_maj_date || r.equip_maj_date < minDate) return 'fiche_perimee';
   if (mapSports(r.aps_name).length === 0) return 'sport_hors_cible';
   return null;
 }
@@ -209,11 +208,9 @@ async function upsertPlaces(q, rows) {
 module.exports = {
   API,
   PAGE_SIZE,
-  MAX_AGE_YEARS,
   TYPES_AUTORISES,
   bool,
   mapSports,
-  minUpdateDate,
   rejectReason,
   toRow,
   buildAdminWhere,

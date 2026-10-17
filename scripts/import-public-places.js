@@ -39,7 +39,6 @@ function parseArgs(argv) {
 (async () => {
   const args = parseArgs(process.argv);
   const where = dataEs.buildAdminWhere(args);
-  const minDateStr = dataEs.minUpdateDate();
 
   const db = mysql.createPool({
     host: process.env.DB_HOST || '127.0.0.1',
@@ -51,8 +50,7 @@ function parseArgs(argv) {
   });
   const q = (sql, p = []) => new Promise((res, rej) => db.query(sql, p, (e, r) => (e ? rej(e) : res(r))));
 
-  console.log(`Filtre : ${where}`);
-  console.log(`Fiches mises à jour depuis ${minDateStr}\n`);
+  console.log(`Filtre : ${where}\n`);
 
   const rejects = {};
   const seenRefs = new Set();          // pour --prune
@@ -78,7 +76,7 @@ function parseArgs(argv) {
       for (const r of page.results) {
         read++;
         if (r.dep_nom) seenDepartments.add(r.dep_nom);
-        const reason = dataEs.rejectReason(r, minDateStr);
+        const reason = dataEs.rejectReason(r);
         if (reason) { rejects[reason] = (rejects[reason] || 0) + 1; continue; }
         kept++;
         seenRefs.add(r.equip_numero);

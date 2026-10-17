@@ -68,11 +68,10 @@ function createPlaceCoverage(db, { fetchPage = dataEs.fetchPage, now = Date.now 
 
   async function load(lat, lng, cellLat, cellLng) {
     const results = await fetchAll(dataEs.buildGeoWhere(lat, lng, FETCH_RADIUS_KM));
-    const minDate = dataEs.minUpdateDate();
     const rows = [];
     const seen = new Set();
     for (const r of results) {
-      if (dataEs.rejectReason(r, minDate) || seen.has(r.equip_numero)) continue;
+      if (dataEs.rejectReason(r) || seen.has(r.equip_numero)) continue;
       seen.add(r.equip_numero);
       rows.push(dataEs.toRow(r));
     }
