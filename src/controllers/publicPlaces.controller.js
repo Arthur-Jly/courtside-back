@@ -79,12 +79,14 @@ class PublicPlacesController {
   /**
    * `coverage` (services/placeCoverage) charge à la demande les terrains d'une
    * zone jamais interrogée ; `verification` (services/placeVerification) les
-   * recoupe avec la BD TOPO de l'IGN. Absents -> la recherche ne lit que la base.
+   * recoupe avec la BD TOPO de l'IGN ; `osmQueue` (services/osmQueue) recoupe
+   * avec OSM en arrière-plan. Absents -> la recherche ne lit que la base.
    */
-  constructor(db, { coverage, verification } = {}) {
+  constructor(db, { coverage, verification, osmQueue } = {}) {
     this.db = db;
     this.coverage = coverage || null;
     this.verification = verification || null;
+    this.osmQueue = osmQueue || null;
   }
 
   /**
@@ -105,6 +107,8 @@ class PublicPlacesController {
     // Puis recoupement IGN des terrains de la zone pas encore vérifiés. Sur une
     // zone déjà vérifiée : une requête SQL, aucun appel sortant.
     if (hasGeo && this.verification) await this.verification.verifyArea(lat, lng, radius);
+    // OSM : jamais attendu (Overpass est lent) — la zone part en file d'attente.
+    if (hasGeo && this.osmQueue) this.osmQueue.enqueueArea(lat, lng, radius);
 
     const select = [BASE_COLUMNS];
     const params = [];

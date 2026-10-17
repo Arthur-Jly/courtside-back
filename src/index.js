@@ -144,7 +144,13 @@ const placeCoverage = process.env.PLACES_LAZY_IMPORT === 'false'
 const placeVerification = process.env.PLACES_VERIFY === 'false'
   ? null
   : require('./services/placeVerification').createPlaceVerification(db);
-const publicPlacesRouter = require('./routes/publicPlaces')(db, { coverage: placeCoverage, verification: placeVerification });
+// Et recoupement OSM en arrière-plan (jamais attendu par la recherche).
+const placeOsmQueue = process.env.PLACES_OSM === 'false'
+  ? null
+  : require('./services/osmQueue').createOsmQueue(db);
+const publicPlacesRouter = require('./routes/publicPlaces')(db, {
+  coverage: placeCoverage, verification: placeVerification, osmQueue: placeOsmQueue,
+});
 const pushRouter = require('./routes/push')(db);
 const notificationsRouter = require('./routes/notifications')(db);
 const realtimeRouter = require('./routes/realtime')();

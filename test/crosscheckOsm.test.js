@@ -22,10 +22,13 @@ test('BK-OSM-01 haversine : mêmes coordonnées = 0, ~111 m par millième de deg
   assert.ok(dLng > 75 && dLng < 83, `attendu ~79 m, obtenu ${dLng}`);
 });
 
-test('BK-OSM-02 le rayon de 50 m sépare un terrain du terrain voisin', () => {
+test('BK-OSM-02 le rayon de 30 m sépare un terrain du terrain voisin', () => {
   const place = { lat: 45.17, lng: 5.72 };
-  // ~33 m au nord : même équipement cartographié avec un léger décalage
-  assert.ok(distanceM(place.lat, place.lng, 45.1703, 5.72) <= MATCH_RADIUS_M);
+  assert.equal(MATCH_RADIUS_M, 30);
+  // ~22 m au nord : même équipement cartographié avec un léger décalage
+  assert.ok(distanceM(place.lat, place.lng, 45.1702, 5.72) <= MATCH_RADIUS_M);
+  // ~44 m : trop loin depuis le durcissement (un parking à 58 m d'un complexe passait à 50 m)
+  assert.ok(distanceM(place.lat, place.lng, 45.1704, 5.72) > MATCH_RADIUS_M);
   // ~220 m : autre terrain, ne doit pas confirmer
   assert.ok(distanceM(place.lat, place.lng, 45.172, 5.72) > MATCH_RADIUS_M);
 });
