@@ -75,8 +75,13 @@ function shapePlace(row) {
 }
 
 class PublicPlacesController {
-  constructor(db) {
+  /**
+   * `coverage` (services/placeCoverage) charge à la demande les terrains d'une
+   * zone jamais interrogée. Absent -> la recherche ne lit que la base.
+   */
+  constructor(db, { coverage } = {}) {
     this.db = db;
+    this.coverage = coverage || null;
   }
 
   /**
@@ -90,6 +95,10 @@ class PublicPlacesController {
     const hasGeo = Number.isFinite(lat) && Number.isFinite(lng);
     const radius = Number.isFinite(Number(filters.radius)) ? Number(filters.radius) : RADIUS_DEFAULT_KM;
     const limit = Math.min(Math.max(parseInt(filters.limit, 10) || SEARCH_LIMIT_DEFAULT, 1), SEARCH_LIMIT_MAX);
+
+    // Zone jamais vue : on la charge depuis Data ES avant de répondre, pour que
+    // n'importe quelle commune de France donne des résultats.
+    if (hasGeo && this.coverage) await this.coverage.ensure(lat, lng, radius);
 
     const select = [BASE_COLUMNS];
     const params = [];

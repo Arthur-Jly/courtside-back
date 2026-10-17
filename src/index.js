@@ -134,7 +134,12 @@ const geocodingRouter = require('./routes/geocoding')(db);
 const reviewsRouter = require('./routes/reviews')(db);
 const financesRouter = require('./routes/finances')(db);
 const announcementsRouter = require('./routes/announcements')(db);
-const publicPlacesRouter = require('./routes/publicPlaces')(db);
+// Terrains publics : une zone jamais interrogée est chargée depuis Data ES à la
+// première recherche (services/placeCoverage). PLACES_LAZY_IMPORT=false coupe ça.
+const placeCoverage = process.env.PLACES_LAZY_IMPORT === 'false'
+  ? null
+  : require('./services/placeCoverage').createPlaceCoverage(db);
+const publicPlacesRouter = require('./routes/publicPlaces')(db, { coverage: placeCoverage });
 const pushRouter = require('./routes/push')(db);
 const notificationsRouter = require('./routes/notifications')(db);
 const realtimeRouter = require('./routes/realtime')();
