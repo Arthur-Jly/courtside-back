@@ -15,10 +15,13 @@
  */
 const { queryPromise, queryOne } = require('../utils/dbHelpers');
 const { VERIFIED_STATUSES } = require('../services/placeStatus');
+const { CONFIRM_RADIUS_M, COMMUNITY_WINDOW_MONTHS, reportThreshold } = require('../services/placeCommunity');
+const { distanceM } = require('../utils/geo');
 
 // Passages de statut automatiques (couche 3, validation communautaire).
+// Les seuils de signalement dépendent du statut : services/placeCommunity.
 const CONFIRMATIONS_FOR_VERIFIED = 3;
-const REPORTS_FOR_INVALID = 3;
+const REPORTS_FOR_INVALID = 3; // terrain confirmé par la communauté (le plus haut seuil)
 
 // Un statut posé par un humain (curation) ne doit pas être écrasé par la communauté.
 const HUMAN_STATUSES = ['manually_curated', 'reported_invalid'];
@@ -236,20 +239,40 @@ class PublicPlacesController {
 
   /**
    * « J'ai joué ici » — couche 3. Idempotent : une confirmation par utilisateur.
-   * Au seuil, le lieu bascule en `community_verified`, sauf si un humain a déjà
-   * tranché (curation ou signalement).
+   * Ne compte que d'un joueur qui a participé à une partie passée sur ce lieu,
+   * ou qui est sur place (position à ≤ 300 m). Sinon : { notEligible: true }.
+   * Au seuil (confirmations des 18 derniers mois), le lieu bascule en
+   * `community_verified`, sauf si un humain a déjà tranché.
    */
-  async confirm(placeId, userId) {
+  async confirm(placeId, userId, { lat, lng } = {}) {
     const place = await queryOne(this.db,
-      'SELECT id, verification_status FROM public_places WHERE id = ?', [placeId]);
+      'SELECT id, lat, lng, verification_status FROM public_places WHERE id = ?', [placeId]);
     if (!place) return null;
+
+    const la = Number(lat);
+    const ln = Number(lng);
+    const onSite = Number.isFinite(la) && Number.isFinite(ln)
+      && distanceM(la, ln, Number(place.lat), Number(place.lng)) <= CONFIRM_RADIUS_M;
+    let played = false;
+    if (!onSite) {
+      played = !!(await queryOne(this.db, `
+        SELECT 1 AS ok FROM annonce_participants ap
+        JOIN announcements a ON a.id = ap.annonce_id
+        WHERE ap.user_id = ? AND a.public_place_ref = ?
+          AND a.slot_start < NOW() AND a.status <> 'cancelled'
+        LIMIT 1
+      `, [userId, placeId]));
+    }
+    if (!onSite && !played) return { notEligible: true };
 
     await queryPromise(this.db,
       'INSERT IGNORE INTO place_confirmations (place_id, user_id, created_at) VALUES (?, ?, NOW())',
       [placeId, userId]);
 
-    const { count } = await queryOne(this.db,
-      'SELECT COUNT(*) AS count FROM place_confirmations WHERE place_id = ?', [placeId]);
+    const { count } = await queryOne(this.db, `
+      SELECT COUNT(*) AS count FROM place_confirmations
+      WHERE place_id = ? AND created_at > DATE_SUB(NOW(), INTERVAL ? MONTH)
+    `, [placeId, COMMUNITY_WINDOW_MONTHS]);
     const confirmations = Number(count) || 0;
 
     const promote = confirmations >= CONFIRMATIONS_FOR_VERIFIED
@@ -270,9 +293,10 @@ class PublicPlacesController {
   }
 
   /**
-   * Signalement — couche 3. Trois « inexistant » suffisent à retirer le lieu de
-   * la recherche : mieux vaut perdre un terrain valide que d'envoyer un joueur
-   * sur un terrain fantôme.
+   * Signalement — couche 3. Le nombre de « inexistant » qui retire le lieu
+   * dépend de ce qu'on en sait (services/placeCommunity.reportThreshold) : un
+   * seul pour un terrain sans preuve, deux s'il est recoupé, trois s'il a été
+   * confirmé par des joueurs. La curation manuelle fait foi.
    */
   async report(placeId, userId, { kind, comment }) {
     const place = await queryOne(this.db,
@@ -293,10 +317,8 @@ class PublicPlacesController {
     const total = Number(counts?.total) || 0;
     const missing = Number(counts?.missing) || 0;
 
-    // La curation manuelle fait foi : elle n'est pas annulée par des signalements.
-    const invalidate = missing >= REPORTS_FOR_INVALID
-      && place.verification_status !== 'manually_curated'
-      && place.verification_status !== 'reported_invalid';
+    const invalidate = place.verification_status !== 'reported_invalid'
+      && missing >= reportThreshold(place.verification_status);
 
     await queryPromise(this.db, `
       UPDATE public_places

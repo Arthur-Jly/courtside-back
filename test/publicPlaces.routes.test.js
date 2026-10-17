@@ -132,8 +132,10 @@ test('BK-PP-03 GET /public-places/:id -> lieu + parties à venir ; inconnu -> 40
 
 // ── BK-PP-04 : confirmations communautaires ─────────────────────────────────
 test('BK-PP-04 3e confirmation -> community_verified ; curation humaine préservée', async () => {
+  // Le joueur a participé à une partie passée sur ce terrain : sa confirmation compte.
   const mk = (status, count) => fakeDb([
-    [/SELECT id, verification_status FROM public_places/, () => [{ id: 12, verification_status: status }]],
+    [/SELECT id, lat, lng, verification_status FROM public_places/, () => [{ id: 12, lat: 45.17, lng: 5.72, verification_status: status }]],
+    [/FROM annonce_participants ap/, () => [{ ok: 1 }]],
     [/INSERT IGNORE INTO place_confirmations/, () => ({ affectedRows: 1 })],
     [/COUNT\(\*\) AS count FROM place_confirmations/, () => [{ count }]],
     [/UPDATE public_places/, () => ({ affectedRows: 1 })],

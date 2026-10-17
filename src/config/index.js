@@ -45,6 +45,10 @@ module.exports = {
     quickExpirationSchedule: process.env.CRON_QUICK_EXPIRATION || '*/15 * * * *',
     reminderSchedule: process.env.CRON_REMINDER || '0 9 * * *',
     cleanupSchedule: process.env.CRON_CLEANUP || '0 4 * * *',
+    // Terrains publics : « le terrain existait ? » après une partie, et expiration
+    // des confirmations communautaires (services/placeCommunity).
+    placeCheckSchedule: process.env.CRON_PLACE_CHECK || '20 * * * *',
+    placeExpirySchedule: process.env.CRON_PLACE_EXPIRY || '30 4 * * *',
   },
   reservations: {
     // Fenêtre max (jours) à laquelle une reservation peut être créée.

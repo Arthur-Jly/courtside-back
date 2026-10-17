@@ -41,17 +41,25 @@ module.exports = (db, { coverage, verification, osmQueue } = {}) => {
     res.json({ place });
   }));
 
-  router.post('/public-places/:id/confirm', requireAuth, writeLimiter, asyncHandler(async (req, res) => {
-    const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
-    const result = await controller.confirm(id, req.user.id);
-    if (!result) throw new NotFoundError('Terrain introuvable');
-    track(db, 'place_confirmed', {
-      userId: req.user.id, placeId: id,
-      payload: { confirmations: result.confirmations_count, status: result.verification_status },
-    });
-    res.json({ success: true, ...result });
-  }));
+  router.post('/public-places/:id/confirm', requireAuth, writeLimiter,
+    validate(schemas.publicPlaceConfirm),
+    asyncHandler(async (req, res) => {
+      const id = Number(req.params.id);
+      if (!Number.isFinite(id)) return res.status(400).json({ error: 'id invalide' });
+      const result = await controller.confirm(id, req.user.id, req.body || {});
+      if (!result) throw new NotFoundError('Terrain introuvable');
+      // Une confirmation n'a de valeur que de quelqu'un qui y a joué ou qui y est.
+      if (result.notEligible) {
+        return res.status(403).json({
+          error: 'Pour confirmer ce terrain, sois sur place (active ta position) ou participe à une partie qui s’y joue.',
+        });
+      }
+      track(db, 'place_confirmed', {
+        userId: req.user.id, placeId: id,
+        payload: { confirmations: result.confirmations_count, status: result.verification_status },
+      });
+      res.json({ success: true, ...result });
+    }));
 
   router.post('/public-places/:id/report',
     requireAuth, writeLimiter,

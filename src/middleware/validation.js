@@ -226,6 +226,13 @@ const schemas = {
     include_unverified: Joi.boolean().truthy('1').falsy('0').optional(),
   }).and('lat', 'lng'),
 
+  // Position du joueur au moment de « J'ai joué ici » (facultative : un
+  // participant à une partie sur place n'en a pas besoin).
+  publicPlaceConfirm: Joi.object({
+    lat: Joi.number().min(-90).max(90).optional(),
+    lng: Joi.number().min(-180).max(180).optional(),
+  }).and('lat', 'lng'),
+
   publicPlaceReport: Joi.object({
     kind: Joi.string().valid('inexistant', 'inaccessible', 'ferme', 'mauvais_etat', 'autre').required(),
     comment: safeStr(1, 500).optional().allow(''),

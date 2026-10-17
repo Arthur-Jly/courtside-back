@@ -9,6 +9,7 @@
 const cron = require('node-cron');
 const AnnouncementsController = require('../controllers/announcements.controller');
 const emailService = require('./emailService');
+const placeCommunity = require('./placeCommunity');
 const { queryPromise } = require('../utils/dbHelpers');
 const { logger } = require('../utils/logger');
 const config = require('../config');
@@ -74,6 +75,22 @@ class CronService {
       schedule: config.cron.cleanupSchedule,
       description: 'Purge les créneaux libres passés et les tokens de reset expirés',
       job: cleanupJob,
+    });
+
+    const placeCheckJob = cron.schedule(config.cron.placeCheckSchedule, () => placeCommunity.askPlaceChecks(this.db));
+    this.jobs.push({
+      name: 'place-checks',
+      schedule: config.cron.placeCheckSchedule,
+      description: 'Demande aux participants d’une partie terminée si le terrain existait',
+      job: placeCheckJob,
+    });
+
+    const placeExpiryJob = cron.schedule(config.cron.placeExpirySchedule, () => placeCommunity.expireCommunityVerified(this.db));
+    this.jobs.push({
+      name: 'place-expiry',
+      schedule: config.cron.placeExpirySchedule,
+      description: 'Réévalue les terrains confirmés par la communauté sans activité depuis 18 mois',
+      job: placeExpiryJob,
     });
 
     logger.info(`${this.jobs.length} tâches automatiques démarrées`);
@@ -186,6 +203,12 @@ class CronService {
     }
     if (jobName === 'db-cleanup') {
       return await this.cleanupDatabase();
+    }
+    if (jobName === 'place-checks') {
+      return await placeCommunity.askPlaceChecks(this.db);
+    }
+    if (jobName === 'place-expiry') {
+      return await placeCommunity.expireCommunityVerified(this.db);
     }
     throw new Error(`Job inconnu: ${jobName}`);
   }
