@@ -250,8 +250,10 @@ const schemas = {
     public_place_id: Joi.string().max(255).optional(),
     public_place_ref: id.optional(),
     city: safeStr(1, 120).optional(),
-    date_from: Joi.date().iso().optional(),
-    date_to: Joi.date().iso().optional(),
+    // .raw() : on valide le format ISO mais on garde la chaîne — le contrôleur la
+    // coupe à 19 caractères pour la comparer au DATETIME local `slot_start`.
+    date_from: Joi.date().iso().raw().optional(),
+    date_to: Joi.date().iso().raw().optional(),
     lat: Joi.number().min(-90).max(90).optional(),
     lng: Joi.number().min(-180).max(180).optional(),
     radius: Joi.number().min(0.5).max(200).optional(),

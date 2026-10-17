@@ -364,6 +364,9 @@ test('BK-ANN-21 GET /announcements filtre ville + fenêtre de dates', async () =
     assert.match(sql, /pp\.verification_status <> 'reported_invalid'/);
     assert.match(sql, /ORDER BY a\.slot_start ASC/);
     assert.ok(params.includes('Grenoble'));
+    // Bornes passées telles quelles (pas un Date sérialisé en « Tue Jan 01 2030… »)
+    assert.ok(params.includes('2030-01-01 00:00:00'));
+    assert.ok(params.includes('2030-01-31 00:00:00'));
   } finally { server.close(); }
 });
 
