@@ -8,7 +8,8 @@ const { queryPromise } = require('./dbHelpers');
  * Never throws: a failed notification must not break the calling flow.
  *
  * Types used so far: friend_request, friend_accept, invitation,
- * session_join, session_cancelled, reservation_confirmed.
+ * session_join, session_cancelled, reservation_confirmed, place_check
+ * (« le terrain existait ? » après une partie — services/placeCommunity).
  */
 function notify(db, userId, type, payload = {}) {
   const uid = Number(userId);

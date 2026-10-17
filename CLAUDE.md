@@ -37,6 +37,14 @@
   `verifyToken` (middleware/auth.js, HS256 pinned) refuse tokens issued before. Called on password
   reset, account deletion, role change. Single-instance like sseHub (Redis / `users.tokens_valid_after` to scale).
 - `accountService.js` — `anonymizeAccount(db, userId)`: the ONE RGPD deletion path (self + admin).
+- Public places (phase 1) — only places with proof of existence are shown by default:
+  `dataEs.js` (Data ES filters, layer 1) · `placeCoverage.js` (on-demand zone load, missing
+  places → `source_missing_at`) · `placeStatus.js` (`deriveStatus`: status FROM stored evidence,
+  human statuses never rewritten) · `bdTopo.js` + `placeVerification.js` (IGN BD TOPO match
+  during geo search, ≤ 3 s, one WFS call per zone) · `osmCheck.js` + `osmQueue.js` (hardened
+  OSM match, background queue — never awaited by search) · `placeCommunity.js` (report
+  thresholds by status, confirm eligibility, `place-checks` / `place-expiry` crons).
+  Scripts: `places:import`, `places:verify`, `places:osm`, `places:curate`.
 - Payments: `payments.controller.js` recomputes the price from `terrains.price_per_hour` × duration +
   `config.reservations.serviceFee`; never trust an amount from the browser. `POST /slots/:id/book`
   (no payment) is off unless `ALLOW_DIRECT_BOOKING=true`.
