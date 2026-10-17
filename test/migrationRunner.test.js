@@ -63,6 +63,17 @@ test('fresh database is provisioned from baseline.sql and migrations are recorde
   assert.ok(executed.some(s => /CREATE TABLE `users`/.test(s)), 'baseline must create users');
 });
 
+// BK-MIG-01 — régression du 17/10/2026 : baseline.sql était restée à 022 alors
+// que 023-025 existaient. Une base neuve recevait la baseline, marquait 023-025
+// comme appliquées sans les jouer, et la recherche de terrains plantait.
+test('BK-MIG-01 baseline.sql folds in the LAST numbered migration', () => {
+  const dir = path.join(__dirname, '..', 'src', 'migrations');
+  const last = fs.readdirSync(dir).filter(f => /^\d+_.+\.sql$/.test(f)).sort().at(-1);
+  const header = fs.readFileSync(path.join(dir, 'baseline.sql'), 'utf8').split(/\r?\n/).slice(0, 5).join('\n');
+  const folded = header.match(/last migration folded in: (\S+?)\)/)?.[1];
+  assert.equal(folded, last, `baseline.sql s'arrête à ${folded} : lancer \`npm run schema:baseline\` après ${last}`);
+});
+
 test('existing database keeps the incremental path (nothing to apply)', async () => {
   const fakeDb = makeFakeDb([
     [/information_schema\.TABLES/, () => [{ n: 36 }]],
