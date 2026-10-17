@@ -6,6 +6,7 @@
  *   node scripts/import-public-places.js --city Grenoble
  *   node scripts/import-public-places.js --all            # France entière
  *   node scripts/import-public-places.js --dep 38 --dry   # simulation
+ *   node scripts/import-public-places.js --dep 38 --no-verify   # sans recoupement IGN
  *
  * Ce script n'est plus indispensable : une recherche sur une zone jamais vue
  * charge ses terrains à la demande (src/services/placeCoverage.js). Il reste
@@ -22,6 +23,7 @@
 require('dotenv').config();
 const mysql = require('mysql2');
 const dataEs = require('../src/services/dataEs');
+const verify = require('./verify-places');
 
 function parseArgs(argv) {
   const out = { dry: false };
@@ -30,6 +32,7 @@ function parseArgs(argv) {
     if (a === '--all') out.all = true;
     else if (a === '--dry') out.dry = true;
     else if (a === '--prune') out.prune = true;
+    else if (a === '--no-verify') out.noVerify = true;
     else if (a === '--dep') out.dep = argv[++i];
     else if (a === '--city') out.city = argv[++i];
   }
@@ -116,6 +119,13 @@ function parseArgs(argv) {
         await q('DELETE FROM public_places WHERE id = ?', [s.id]);
         pruned++;
       }
+    }
+
+    // Recoupement IGN des départements importés : sans preuve d'existence, un
+    // terrain n'est pas montré par défaut (services/placeStatus).
+    if (!args.dry && !args.noVerify && seenDepartments.size > 0) {
+      console.log('\n── Recoupement BD TOPO (IGN) ─────────────');
+      await verify.run(db, { departments: [...seenDepartments] });
     }
 
     console.log('\n── Résultat ──────────────────────────────');

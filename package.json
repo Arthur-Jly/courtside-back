@@ -12,6 +12,7 @@
     "seed:admin": "node scripts/seed-admin.js",
     "places:import": "node scripts/import-public-places.js",
     "places:osm": "node scripts/crosscheck-osm.js",
+    "places:verify": "node scripts/verify-places.js",
     "places:curate": "node scripts/curate-places.js",
     "schema:doc": "node scripts/schema-doc.js ../courtside-front/docs/SCHEMA.md",
     "schema:baseline": "node scripts/baseline-schema.js",

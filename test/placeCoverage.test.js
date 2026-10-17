@@ -36,7 +36,7 @@ function makeDb({ covered = false, local = 0, existing = [] } = {}) {
   return fakeDb([
     [/FROM place_coverage/, () => (covered ? [{ ok: 1 }] : [])],
     [/COUNT\(\*\).*FROM public_places/s, () => [{ n: local }]],
-    [/SELECT id, external_ref, verification_status FROM public_places/, () => existing],
+    [/SELECT id, external_ref, verification_status.* FROM public_places/, () => existing],
     [/INSERT INTO public_places/, () => ({ insertId: 1 })],
     [/UPDATE public_places/, () => ({ affectedRows: 1 })],
     [/INSERT INTO place_coverage/, () => ({ affectedRows: 1 })],

@@ -27,8 +27,9 @@ const STATUS_RANK_SQL = `
   CASE p.verification_status
     WHEN 'manually_curated'   THEN 0
     WHEN 'community_verified' THEN 1
-    WHEN 'osm_confirmed'      THEN 2
-    ELSE 3
+    WHEN 'ign_confirmed'      THEN 2
+    WHEN 'osm_confirmed'      THEN 3
+    ELSE 4
   END`;
 
 // Haversine en SQL. LEAST(1, …) évite un NaN sur les arrondis flottants.
@@ -77,11 +78,13 @@ function shapePlace(row) {
 class PublicPlacesController {
   /**
    * `coverage` (services/placeCoverage) charge à la demande les terrains d'une
-   * zone jamais interrogée. Absent -> la recherche ne lit que la base.
+   * zone jamais interrogée ; `verification` (services/placeVerification) les
+   * recoupe avec la BD TOPO de l'IGN. Absents -> la recherche ne lit que la base.
    */
-  constructor(db, { coverage } = {}) {
+  constructor(db, { coverage, verification } = {}) {
     this.db = db;
     this.coverage = coverage || null;
+    this.verification = verification || null;
   }
 
   /**
@@ -99,6 +102,9 @@ class PublicPlacesController {
     // Zone jamais vue : on la charge depuis Data ES avant de répondre, pour que
     // n'importe quelle commune de France donne des résultats.
     if (hasGeo && this.coverage) await this.coverage.ensure(lat, lng, radius);
+    // Puis recoupement IGN des terrains de la zone pas encore vérifiés. Sur une
+    // zone déjà vérifiée : une requête SQL, aucun appel sortant.
+    if (hasGeo && this.verification) await this.verification.verifyArea(lat, lng, radius);
 
     const select = [BASE_COLUMNS];
     const params = [];

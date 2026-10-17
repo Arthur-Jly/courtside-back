@@ -36,9 +36,9 @@ const SPORTS_MAP = [
   [/basket/i, 'basket'],
 ];
 
-// Ces statuts sont posés par un humain (curation, communauté, signalement) :
-// un réimport ne les réécrit jamais.
-const PROTECTED_STATUSES = ['manually_curated', 'community_verified', 'reported_invalid'];
+// Statuts posés par un humain (curation, communauté, signalement) : un réimport
+// ne les réécrit jamais. Liste partagée : services/placeStatus.
+const { PROTECTED_STATUSES } = require('./placeStatus');
 
 // L'API Data ES renvoie ses booléens tantôt en booléens, tantôt en chaînes
 // ("true"/"false", et "Oui"/"Non" pour `inst_hs_bool`) selon le champ. On normalise.
@@ -170,7 +170,7 @@ async function upsertPlaces(q, rows) {
   if (rows.length === 0) return counts;
 
   const found = await q(
-    'SELECT id, external_ref, verification_status FROM public_places WHERE external_ref IN (?)',
+    'SELECT id, external_ref, verification_status, lat, lng, original_lat, original_lng FROM public_places WHERE external_ref IN (?)',
     [rows.map(r => r.external_ref)]
   );
   const existing = new Map(found.map(f => [f.external_ref, f]));
@@ -191,13 +191,22 @@ async function upsertPlaces(q, rows) {
     } else if (PROTECTED_STATUSES.includes(known.verification_status)) {
       counts.skippedCurated++;
     } else {
+      // Le point a pu être recalé sur le terrain IGN (original_* = point Data ES) :
+      // tant que Data ES ne déplace pas l'équipement, on garde le point recalé.
+      // S'il le déplace, on reprend son point et on revérifie (IGN, OSM).
+      const sourceLat = Number(known.original_lat != null ? known.original_lat : known.lat);
+      const sourceLng = Number(known.original_lng != null ? known.original_lng : known.lng);
+      const moved = Math.abs(sourceLat - row.lat) > 1e-5 || Math.abs(sourceLng - row.lng) > 1e-5;
+      const coordsSql = moved
+        ? ', lat=?, lng=?, original_lat=NULL, original_lng=NULL, ign_checked_at=NULL, osm_checked_at=NULL'
+        : '';
       await q(
         `UPDATE public_places SET name=?, equip_type=?, sports=?, address=?, postal_code=?,
-           city=?, department=?, lat=?, lng=?, lighting=?, seasonal=?, accessible_pmr=?,
-           data_updated_at=? WHERE id=?`,
+           city=?, department=?, lighting=?, seasonal=?, accessible_pmr=?,
+           data_updated_at=?, source_missing_at=NULL${coordsSql} WHERE id=?`,
         [row.name, row.equip_type, row.sports, row.address, row.postal_code, row.city,
-          row.department, row.lat, row.lng, row.lighting, row.seasonal, row.accessible_pmr,
-          row.data_updated_at, known.id]
+          row.department, row.lighting, row.seasonal, row.accessible_pmr, row.data_updated_at,
+          ...(moved ? [row.lat, row.lng] : []), known.id]
       );
       counts.updated++;
     }

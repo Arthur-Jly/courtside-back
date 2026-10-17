@@ -18,9 +18,9 @@ const writeLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-module.exports = (db, { coverage } = {}) => {
+module.exports = (db, { coverage, verification } = {}) => {
   const router = express.Router();
-  const controller = new PublicPlacesController(db, { coverage });
+  const controller = new PublicPlacesController(db, { coverage, verification });
 
   router.get('/public-places',
     validate(schemas.publicPlaceQuery, 'query'),

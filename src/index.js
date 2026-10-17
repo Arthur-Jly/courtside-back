@@ -139,7 +139,12 @@ const announcementsRouter = require('./routes/announcements')(db);
 const placeCoverage = process.env.PLACES_LAZY_IMPORT === 'false'
   ? null
   : require('./services/placeCoverage').createPlaceCoverage(db);
-const publicPlacesRouter = require('./routes/publicPlaces')(db, { coverage: placeCoverage });
+// Puis recoupement avec la BD TOPO de l'IGN (services/placeVerification) : les
+// terrains sans preuve d'existence ne sont plus montrés par défaut.
+const placeVerification = process.env.PLACES_VERIFY === 'false'
+  ? null
+  : require('./services/placeVerification').createPlaceVerification(db);
+const publicPlacesRouter = require('./routes/publicPlaces')(db, { coverage: placeCoverage, verification: placeVerification });
 const pushRouter = require('./routes/push')(db);
 const notificationsRouter = require('./routes/notifications')(db);
 const realtimeRouter = require('./routes/realtime')();
