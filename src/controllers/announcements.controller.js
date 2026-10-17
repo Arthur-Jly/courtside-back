@@ -300,6 +300,7 @@ class AnnouncementsController {
       manual_city,
       lat,
       lng,
+      place_unverified_ack,
     } = announcementData;
 
     logger.debug('🔍 createAnnouncement - Données reçues:', announcementData);
@@ -346,6 +347,7 @@ class AnnouncementsController {
         manual_city,
         lat,
         lng,
+        place_unverified_ack,
       });
     } else {
       // CLUB PRIVÉ : Validation du slot
@@ -387,6 +389,7 @@ class AnnouncementsController {
       manual_city,
       lat,
       lng,
+      place_unverified_ack,
     } = data;
 
     logger.debug('🏞️ Création annonce LIEU PUBLIC');
@@ -398,11 +401,17 @@ class AnnouncementsController {
     let place = null;
     if (public_place_ref) {
       place = await queryOne(this.db,
-        `SELECT id, name, address, city, lat, lng, verification_status
+        `SELECT id, name, address, city, lat, lng, verification_status, source_missing_at
          FROM public_places WHERE id = ?`, [public_place_ref]);
       if (!place) throw new NotFoundError('Terrain introuvable');
-      if (place.verification_status === 'reported_invalid') {
+      if (place.verification_status === 'reported_invalid' || place.source_missing_at) {
         throw new ValidationError('Ce terrain a été signalé comme inexistant');
+      }
+      // Terrain sans aucune preuve d'existence (ni IGN, ni OSM, ni joueurs) : une
+      // partie dessus peut envoyer des joueurs sur un terrain fantôme. L'organisateur
+      // doit confirmer qu'il le connaît (case cochée côté front).
+      if (place.verification_status === 'auto' && place_unverified_ack !== true) {
+        throw new ConflictError("Ce terrain n'est pas encore vérifié : confirme qu'il existe avant d'y proposer une partie");
       }
       placeRef = place.id;
     }

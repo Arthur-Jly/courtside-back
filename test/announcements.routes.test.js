@@ -349,6 +349,49 @@ test('BK-ANN-20b terrain signalé inexistant -> refus ; aucun lieu -> refus', as
   } finally { server.close(); }
 });
 
+test('BK-ANN-20c terrain sans preuve d’existence : 409 sans confirmation de l’organisateur, accepté avec', async () => {
+  const autoPlace = () => [{
+    id: 12, name: 'Terrain de jeux', address: 'Quartier Beaulieu', city: 'Domène',
+    lat: '45.196500', lng: '5.829550', verification_status: 'auto', source_missing_at: null,
+  }];
+  const body = {
+    sport_type: 'foot', places_total: 10, public_place_ref: 12,
+    manual_date: '2030-01-15', manual_start_time: '19:00', manual_end_time: '20:30',
+  };
+
+  let db = fakeDb([[/FROM public_places WHERE id/, autoPlace]]);
+  let { server, url } = await listen(makeApp(db));
+  try {
+    const res = await postJson(`${url}/api/announcements`, body, AUTH);
+    assert.equal(res.status, 409);
+    assert.match((await res.json()).error, /pas encore vérifié/);
+  } finally { server.close(); }
+
+  db = fakeDb([
+    [/FROM public_places WHERE id/, autoPlace],
+    [/INSERT INTO announcements/, () => ({ insertId: 43 })],
+    [/SELECT id FROM annonce_participants/, () => []],
+    [/SELECT places_disponibles.*FROM announcements/, () => [{ places_disponibles: 10 }]],
+    [/INSERT INTO annonce_participants/, () => ({ insertId: 1 })],
+    [/UPDATE announcements SET places_disponibles/, () => ({ affectedRows: 1 })],
+    [/SELECT a\.\*/, () => [{ id: 43, visibility: 'public', sport_type: 'foot', city: 'Domène' }]],
+    [/SELECT ap\.\*|FROM annonce_participants ap/, () => []],
+  ]);
+  ({ server, url } = await listen(makeApp(db)));
+  try {
+    const res = await postJson(`${url}/api/announcements`, { ...body, place_unverified_ack: true }, AUTH);
+    assert.equal(res.status, 201);
+  } finally { server.close(); }
+
+  // Terrain disparu de Data ES : refusé comme un terrain signalé.
+  db = fakeDb([[/FROM public_places WHERE id/, () => [{ ...autoPlace()[0], source_missing_at: new Date() }]]]);
+  ({ server, url } = await listen(makeApp(db)));
+  try {
+    const res = await postJson(`${url}/api/announcements`, { ...body, place_unverified_ack: true }, AUTH);
+    assert.equal(res.status, 400);
+  } finally { server.close(); }
+});
+
 // ── BK-ANN-21 : filtres de liste (ville, dates, lieu) ──────────────────────
 test('BK-ANN-21 GET /announcements filtre ville + fenêtre de dates', async () => {
   const db = fakeDb([[/FROM announcements a/, () => []]]);

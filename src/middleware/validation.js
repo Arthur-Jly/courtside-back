@@ -223,6 +223,7 @@ const schemas = {
     lng: Joi.number().min(-180).max(180).optional(),
     radius: Joi.number().min(0.5).max(100).optional(),
     limit: Joi.number().integer().min(1).max(100).optional(),
+    include_unverified: Joi.boolean().truthy('1').falsy('0').optional(),
   }).and('lat', 'lng'),
 
   publicPlaceReport: Joi.object({

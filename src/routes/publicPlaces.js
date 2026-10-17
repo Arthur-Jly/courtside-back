@@ -26,7 +26,10 @@ module.exports = (db, { coverage, verification, osmQueue } = {}) => {
     validate(schemas.publicPlaceQuery, 'query'),
     asyncHandler(async (req, res) => {
       const places = await controller.search(req.query);
-      res.json({ places, count: places.length });
+      // Rubrique « À confirmer (n) » : combien de terrains sans preuve la
+      // recherche a écartés (inutile quand ils sont déjà inclus).
+      const unverified = req.query.include_unverified ? undefined : await controller.countUnverified(req.query);
+      res.json({ places, count: places.length, unverified_count: unverified });
     }));
 
   router.get('/public-places/:id', asyncHandler(async (req, res) => {

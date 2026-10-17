@@ -67,7 +67,10 @@ test('BK-PP-01 GET /public-places filtre ville/sport, exclut les lieux invalidé
     assert.equal(body.places[0].lighting, true);
 
     const { sql, params } = db.calls[0];
-    assert.match(sql, /verification_status <> 'reported_invalid'/);
+    // Liste blanche de statuts : ni `reported_invalid`, ni (par défaut) `auto`.
+    assert.match(sql, /p\.verification_status IN \(\?,\?,\?,\?\)/);
+    assert.ok(!params.includes('reported_invalid') && !params.includes('auto'));
+    assert.match(sql, /p\.source_missing_at IS NULL/);
     assert.match(sql, /LOWER\(p\.city\) = LOWER\(\?\)/);
     assert.match(sql, /JSON_CONTAINS\(p\.sports, \?\)/);
     assert.ok(params.includes('Grenoble'));

@@ -3,13 +3,18 @@
  *
  * Le référentiel vient de Data ES (import: scripts/import-public-places.js). Un
  * référentiel national contient forcément des équipements détruits, murés ou
- * fantômes : la qualité prime sur la couverture. D'où deux règles appliquées ici
+ * fantômes : la qualité prime sur la couverture. D'où ces règles, appliquées ici
  * et nulle part ailleurs :
  *
- *   1. un lieu `reported_invalid` n'est JAMAIS renvoyé, même en recherche directe ;
- *   2. le tri met devant ce qui est vérifié (curation humaine > communauté > OSM > auto).
+ *   1. un lieu `reported_invalid` ou disparu de Data ES (`source_missing_at`)
+ *      n'est JAMAIS renvoyé, même en recherche directe ;
+ *   2. la recherche ne montre par défaut que les lieux avec une preuve d'existence
+ *      (services/placeStatus.VERIFIED_STATUSES) ; les autres (`auto`) seulement sur
+ *      demande (`include_unverified`, rubrique « À confirmer ») ;
+ *   3. le tri met devant ce qui est le mieux vérifié (humain > communauté > IGN > OSM).
  */
 const { queryPromise, queryOne } = require('../utils/dbHelpers');
+const { VERIFIED_STATUSES } = require('../services/placeStatus');
 
 // Passages de statut automatiques (couche 3, validation communautaire).
 const CONFIRMATIONS_FOR_VERIFIED = 3;
@@ -17,6 +22,9 @@ const REPORTS_FOR_INVALID = 3;
 
 // Un statut posé par un humain (curation) ne doit pas être écrasé par la communauté.
 const HUMAN_STATUSES = ['manually_curated', 'reported_invalid'];
+
+// Montrés quand l'utilisateur ouvre « À confirmer » : les vérifiés + les sans preuve.
+const VISIBLE_STATUSES = [...VERIFIED_STATUSES, 'auto'];
 
 const SEARCH_LIMIT_DEFAULT = 30;
 const SEARCH_LIMIT_MAX = 100;
@@ -43,7 +51,7 @@ const BASE_COLUMNS = `
   p.id, p.external_ref, p.name, p.equip_type, p.sports, p.address, p.postal_code,
   p.city, p.department, p.lat, p.lng, p.free_access, p.lighting, p.seasonal,
   p.accessible_pmr, p.source, p.verification_status, p.confirmations_count,
-  p.reports_count, p.last_played_at, p.photo_url`;
+  p.reports_count, p.last_played_at, p.photo_url, p.ign_confirmed_at, p.osm_disused`;
 
 /** `sports` est une colonne JSON : mysql2 la renvoie parfois en texte. */
 function parseSports(value) {
@@ -110,9 +118,17 @@ class PublicPlacesController {
     // OSM : jamais attendu (Overpass est lent) — la zone part en file d'attente.
     if (hasGeo && this.osmQueue) this.osmQueue.enqueueArea(lat, lng, radius);
 
+    const { where, params: whereParams } = this._filters({ city, sport, q, lat, lng, hasGeo, radius });
+
+    // Par défaut : seulement les terrains dont on a une preuve d'existence.
+    // `include_unverified` ajoute les terrains sans preuve (rubrique « À confirmer »).
+    const statusSql = filters.include_unverified
+      ? `p.verification_status IN (${VISIBLE_STATUSES.map(() => '?').join(',')}) AND NOT (p.verification_status = 'auto' AND p.osm_disused = 1)`
+      : `p.verification_status IN (${VERIFIED_STATUSES.map(() => '?').join(',')})`;
+    const statusParams = filters.include_unverified ? VISIBLE_STATUSES : VERIFIED_STATUSES;
+
     const select = [BASE_COLUMNS];
     const params = [];
-
     if (hasGeo) {
       select.push(`${DISTANCE_SQL} AS distance_km`);
       params.push(lat, lng, lat);
@@ -120,28 +136,10 @@ class PublicPlacesController {
 
     let sql = `SELECT ${select.join(',\n')}
       FROM public_places p
-      WHERE p.verification_status <> 'reported_invalid'`;
+      WHERE ${statusSql} AND ${where}`;
+    params.push(...statusParams, ...whereParams);
 
-    if (city) {
-      sql += ' AND LOWER(p.city) = LOWER(?)';
-      params.push(String(city).trim());
-    }
-    if (sport && sport !== 'all') {
-      sql += ' AND JSON_CONTAINS(p.sports, ?)';
-      params.push(JSON.stringify(String(sport).toLowerCase()));
-    }
-    if (q) {
-      sql += ' AND (p.name LIKE ? OR p.address LIKE ? OR p.city LIKE ?)';
-      const like = `%${String(q).trim()}%`;
-      params.push(like, like, like);
-    }
     if (hasGeo) {
-      // Pré-filtre en boîte englobante : il utilise l'index (lat, lng), là où
-      // la haversine seule forcerait un scan complet.
-      const latDelta = radius / 111;
-      const lngDelta = radius / (111 * Math.max(Math.cos((lat * Math.PI) / 180), 0.01));
-      sql += ' AND p.lat BETWEEN ? AND ? AND p.lng BETWEEN ? AND ?';
-      params.push(lat - latDelta, lat + latDelta, lng - lngDelta, lng + lngDelta);
       sql += ` HAVING distance_km <= ?`;
       params.push(radius);
       sql += ` ORDER BY distance_km ASC, ${STATUS_RANK_SQL} ASC`;
@@ -156,12 +154,64 @@ class PublicPlacesController {
     return rows.map(shapePlace);
   }
 
+  /**
+   * Nombre de terrains sans preuve qu'une recherche n'affiche pas par défaut
+   * (libellé « À confirmer (n) »). Mêmes filtres que `search`.
+   */
+  async countUnverified(filters = {}) {
+    const { city, sport, q } = filters;
+    const lat = Number(filters.lat);
+    const lng = Number(filters.lng);
+    const hasGeo = Number.isFinite(lat) && Number.isFinite(lng);
+    const radius = Number.isFinite(Number(filters.radius)) ? Number(filters.radius) : RADIUS_DEFAULT_KM;
+    const { where, params: whereParams } = this._filters({ city, sport, q, lat, lng, hasGeo, radius });
+
+    const inner = hasGeo
+      ? `SELECT ${DISTANCE_SQL} AS distance_km FROM public_places p
+         WHERE p.verification_status = 'auto' AND p.osm_disused = 0 AND ${where}
+         HAVING distance_km <= ?`
+      : `SELECT p.id FROM public_places p
+         WHERE p.verification_status = 'auto' AND p.osm_disused = 0 AND ${where}`;
+    const params = hasGeo ? [lat, lng, lat, ...whereParams, radius] : whereParams;
+    const row = await queryOne(this.db, `SELECT COUNT(*) AS n FROM (${inner}) t`, params);
+    return Number(row?.n) || 0;
+  }
+
+  /** Filtres communs (ville, sport, texte, boîte englobante) + exclusions dures. */
+  _filters({ city, sport, q, lat, lng, hasGeo, radius }) {
+    // Un terrain disparu de Data ES au dernier rafraîchissement n'est plus montré.
+    const clauses = ['p.source_missing_at IS NULL'];
+    const params = [];
+    if (city) {
+      clauses.push('LOWER(p.city) = LOWER(?)');
+      params.push(String(city).trim());
+    }
+    if (sport && sport !== 'all') {
+      clauses.push('JSON_CONTAINS(p.sports, ?)');
+      params.push(JSON.stringify(String(sport).toLowerCase()));
+    }
+    if (q) {
+      clauses.push('(p.name LIKE ? OR p.address LIKE ? OR p.city LIKE ?)');
+      const like = `%${String(q).trim()}%`;
+      params.push(like, like, like);
+    }
+    if (hasGeo) {
+      // Pré-filtre en boîte englobante : il utilise l'index (lat, lng), là où
+      // la haversine seule forcerait un scan complet.
+      const latDelta = radius / 111;
+      const lngDelta = radius / (111 * Math.max(Math.cos((lat * Math.PI) / 180), 0.01));
+      clauses.push('p.lat BETWEEN ? AND ? AND p.lng BETWEEN ? AND ?');
+      params.push(lat - latDelta, lat + latDelta, lng - lngDelta, lng + lngDelta);
+    }
+    return { where: clauses.join(' AND '), params };
+  }
+
   /** Détail d'un lieu. Renvoie null si inconnu ou signalé invalide. */
   async getById(id) {
     const row = await queryOne(this.db, `
       SELECT ${BASE_COLUMNS}
       FROM public_places p
-      WHERE p.id = ? AND p.verification_status <> 'reported_invalid'
+      WHERE p.id = ? AND p.verification_status <> 'reported_invalid' AND p.source_missing_at IS NULL
     `, [id]);
     return shapePlace(row);
   }
