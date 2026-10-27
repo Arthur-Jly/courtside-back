@@ -56,7 +56,11 @@ function createCityLocator({ fetchCommune = fetchCommunes } = {}) {
     cache.set(key, value);
   };
 
-  /** `{ lat, lng, radiusKm }` du centre de la commune, ou null. Ne rejette jamais. */
+  /**
+   * `{ lat, lng, radiusKm, name }` du centre de la commune, ou null. Ne rejette
+   * jamais. `name` est le nom officiel (« Saint-Étienne » pour « saint etienne ») :
+   * c'est lui que le filtre SQL sur `public_places.city` doit comparer.
+   */
   function locate(city) {
     const key = normalizeCity(city);
     if (!key) return Promise.resolve(null);
@@ -69,7 +73,7 @@ function createCityLocator({ fetchCommune = fetchCommunes } = {}) {
       const hit = (Array.isArray(communes) ? communes : [])
         .find(c => normalizeCity(c.nom) === key && Array.isArray(c.centre?.coordinates));
       const found = hit
-        ? { lat: hit.centre.coordinates[1], lng: hit.centre.coordinates[0], radiusKm: radiusFromSurface(hit.surface) }
+        ? { lat: hit.centre.coordinates[1], lng: hit.centre.coordinates[0], radiusKm: radiusFromSurface(hit.surface), name: hit.nom }
         : null;
       remember(key, found);
       return found;

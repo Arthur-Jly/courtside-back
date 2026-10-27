@@ -246,3 +246,26 @@ test('BK-PC-11 GET /public-places?city= sans coordonnées : zone de la commune c
     assert.ok(!seen.located.includes('Paris'), 'avec coordonnées, la ville n’est pas résolue');
   } finally { server.close(); }
 });
+
+test('BK-PC-15 ville tapée autrement (« saint etienne ») : recherche et compteur filtrent sur le nom officiel', async () => {
+  const db = fakeDb([[/FROM public_places p/, () => []], [/COUNT\(\*\) AS n FROM \(/, () => [{ n: 0 }]]]);
+  let lookups = 0;
+  const deps = {
+    cityLocator: { locate: async () => { lookups += 1; return { lat: 45.43, lng: 4.39, radiusKm: 8, name: 'Saint-Étienne' }; } },
+  };
+  const app = express();
+  app.use(express.json());
+  app.use('/api', publicPlacesRouter(db, deps));
+  app.use(errorHandler);
+  const { server, url } = await listen(app);
+  try {
+    const res = await fetch(`${url}/api/public-places?city=${encodeURIComponent('saint etienne')}`);
+    assert.equal(res.status, 200);
+    const search = db.calls.find(c => /LIMIT \?/.test(c.sql));
+    const count = db.calls.find(c => /COUNT\(\*\) AS n FROM \(/.test(c.sql));
+    assert.ok(search.params.includes('Saint-Étienne'), 'recherche : nom officiel');
+    assert.ok(!search.params.includes('saint etienne'));
+    assert.ok(count.params.includes('Saint-Étienne'), 'compteur « À confirmer » : même ville');
+    assert.equal(lookups, 2, 'le compteur repasse par le locator (servi par son cache en vrai)');
+  } finally { server.close(); }
+});

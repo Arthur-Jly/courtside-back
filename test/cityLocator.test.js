@@ -15,6 +15,7 @@ test('BK-PC-12 la commune doit porter le nom demandé (accents, casse et tirets 
   });
   const found = await locator.locate('saint etienne');
   assert.deepEqual({ lat: found.lat, lng: found.lng }, { lat: 45.43, lng: 4.39 });
+  assert.equal(found.name, 'Saint-Étienne', 'nom officiel, pour le filtre SQL');
   assert.equal(normalizeCity('Saint-Étienne'), 'saint etienne');
 
   // Recherche floue : « Grenob » ne doit pas charger la zone de Grenoble.

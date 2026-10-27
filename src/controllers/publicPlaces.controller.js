@@ -111,7 +111,7 @@ class PublicPlacesController {
   async _prepareArea({ city, lat, lng, hasGeo, radius }) {
     let area = hasGeo ? { lat, lng, radiusKm: radius } : null;
     if (!area && city && this.cityLocator) area = await this.cityLocator.locate(city);
-    if (!area) return;
+    if (!area) return null;
     // Zone jamais vue : on la charge depuis Data ES avant de répondre, pour que
     // n'importe quelle commune de France donne des résultats.
     if (this.coverage) await this.coverage.ensure(area.lat, area.lng, area.radiusKm);
@@ -120,6 +120,18 @@ class PublicPlacesController {
     if (this.verification) await this.verification.verifyArea(area.lat, area.lng, area.radiusKm);
     // OSM : jamais attendu (Overpass est lent) — la zone part en file d'attente.
     if (this.osmQueue) this.osmQueue.enqueueArea(area.lat, area.lng, area.radiusKm);
+    return area;
+  }
+
+  /**
+   * Ville à comparer en SQL : le nom officiel de la commune quand on l'a résolue
+   * (« saint etienne » → « Saint-Étienne »), sinon le texte reçu. Sans ça, la
+   * zone était chargée puis le filtre `LOWER(p.city) = LOWER(?)` ne trouvait rien.
+   */
+  async _cityName(city, hasGeo, area) {
+    if (!city || hasGeo) return city;
+    const located = area !== undefined ? area : (this.cityLocator ? await this.cityLocator.locate(city) : null);
+    return located?.name || city;
   }
 
   /**
@@ -134,9 +146,10 @@ class PublicPlacesController {
     const radius = Number.isFinite(Number(filters.radius)) ? Number(filters.radius) : RADIUS_DEFAULT_KM;
     const limit = Math.min(Math.max(parseInt(filters.limit, 10) || SEARCH_LIMIT_DEFAULT, 1), SEARCH_LIMIT_MAX);
 
-    await this._prepareArea({ city, lat, lng, hasGeo, radius });
+    const area = await this._prepareArea({ city, lat, lng, hasGeo, radius });
+    const cityName = await this._cityName(city, hasGeo, area);
 
-    const { where, params: whereParams } = this._filters({ city, sport, q, lat, lng, hasGeo, radius });
+    const { where, params: whereParams } = this._filters({ city: cityName, sport, q, lat, lng, hasGeo, radius });
 
     // Par défaut : seulement les terrains dont on a une preuve d'existence.
     // `include_unverified` ajoute les terrains sans preuve (rubrique « À confirmer »).
@@ -182,7 +195,9 @@ class PublicPlacesController {
     const lng = Number(filters.lng);
     const hasGeo = Number.isFinite(lat) && Number.isFinite(lng);
     const radius = Number.isFinite(Number(filters.radius)) ? Number(filters.radius) : RADIUS_DEFAULT_KM;
-    const { where, params: whereParams } = this._filters({ city, sport, q, lat, lng, hasGeo, radius });
+    // Ville déjà résolue par `search` juste avant : réponse du cache, aucun appel.
+    const cityName = await this._cityName(city, hasGeo);
+    const { where, params: whereParams } = this._filters({ city: cityName, sport, q, lat, lng, hasGeo, radius });
 
     const inner = hasGeo
       ? `SELECT ${DISTANCE_SQL} AS distance_km FROM public_places p
