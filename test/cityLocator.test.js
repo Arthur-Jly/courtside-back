@@ -54,3 +54,20 @@ test('BK-PC-14 cache (même les villes inconnues), un seul appel en vol ; une pa
   assert.equal((await flaky.locate('Nantes')).lat, 47.22);
   assert.equal(await createCityLocator({ fetchCommune: async () => [] }).locate('  '), null);
 });
+
+test('BK-PC-16 budget horaire d’appels : au-delà, null sans appel ni cache ; repart après une heure', async () => {
+  let t = 0;
+  let calls = 0;
+  const locator = createCityLocator({
+    now: () => t, hourlyBudget: 2,
+    fetchCommune: async (name) => { calls += 1; return [commune(name, 5, 45)]; },
+  });
+  assert.ok(await locator.locate('Aaa'));
+  assert.ok(await locator.locate('Bbb'));
+  assert.equal(await locator.locate('Ccc'), null, 'budget épuisé');
+  assert.equal(calls, 2);
+  assert.ok(await locator.locate('Aaa'), 'une ville en cache reste servie sans budget');
+  t += 3600 * 1000 + 1;
+  assert.ok(await locator.locate('Ccc'), 'non mise en cache pendant la panne de budget, résolue ensuite');
+  assert.equal(calls, 3);
+});

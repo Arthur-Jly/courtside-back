@@ -12,7 +12,10 @@
  *     recherche floue de l'API ne doit pas charger la zone d'une autre commune ;
  *   - cache mémoire (y compris les échecs « pas de commune ») et un seul appel
  *     par ville en cours ;
- *   - délai max 2 s, toute erreur avalée : la recherche répond avec la base.
+ *   - délai max 2 s, toute erreur avalée : la recherche répond avec la base ;
+ *   - budget d'appels sortants par heure, comme placeCoverage / placeVerification :
+ *     des noms de ville tous différents ne déclenchent pas un appel chacun sans fin.
+ *     Budget épuisé → null non mis en cache (la ville sera résolue plus tard).
  */
 const { logger } = require('../utils/logger');
 
@@ -21,6 +24,7 @@ const TIMEOUT_MS = 2000;
 const CACHE_MAX = 2000;
 const MIN_RADIUS_KM = 3;
 const MAX_RADIUS_KM = 15;
+const HOURLY_BUDGET = 300;
 
 /** « Saint-Étienne » et « saint etienne » désignent la même ville. */
 function normalizeCity(name) {
@@ -47,9 +51,18 @@ async function fetchCommunes(name, { timeoutMs = TIMEOUT_MS } = {}) {
   return res.json();
 }
 
-function createCityLocator({ fetchCommune = fetchCommunes } = {}) {
+function createCityLocator({ fetchCommune = fetchCommunes, now = Date.now, hourlyBudget = HOURLY_BUDGET } = {}) {
   const cache = new Map();
   const inFlight = new Map();
+  let windowStart = now();
+  let used = 0;
+
+  const takeBudget = () => {
+    if (now() - windowStart > 3600 * 1000) { windowStart = now(); used = 0; }
+    if (used >= hourlyBudget) return false;
+    used++;
+    return true;
+  };
 
   const remember = (key, value) => {
     if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value);
@@ -66,6 +79,10 @@ function createCityLocator({ fetchCommune = fetchCommunes } = {}) {
     if (!key) return Promise.resolve(null);
     if (cache.has(key)) return Promise.resolve(cache.get(key));
     if (inFlight.has(key)) return inFlight.get(key);
+    if (!takeBudget()) {
+      logger.warn('cityLocator: budget horaire épuisé');
+      return Promise.resolve(null);
+    }
 
     const run = (async () => {
       const communes = await fetchCommune(String(city).trim());
@@ -92,4 +109,4 @@ function createCityLocator({ fetchCommune = fetchCommunes } = {}) {
   return { locate };
 }
 
-module.exports = { createCityLocator, normalizeCity, radiusFromSurface };
+module.exports = { createCityLocator, normalizeCity, radiusFromSurface, HOURLY_BUDGET };
