@@ -45,7 +45,7 @@
   during geo search, ≤ 3 s, one WFS call per zone) · `osmCheck.js` + `osmQueue.js` (hardened
   OSM match, background queue — never awaited by search) · `cityLocator.js` (city-only search →
   commune centre + radius via geo.api.gouv.fr, exact name, cached; the SQL city filter uses the official
-  commune name it returns) · `placeCommunity.js` (report
+  commune name it returns; 300 outgoing calls/h budget) · `placeCommunity.js` (report
   thresholds by status, confirm eligibility, `place-checks` / `place-expiry` crons).
   Scripts: `places:import`, `places:verify`, `places:osm`, `places:curate`.
 - Payments: `payments.controller.js` recomputes the price from `terrains.price_per_hour` × duration +
