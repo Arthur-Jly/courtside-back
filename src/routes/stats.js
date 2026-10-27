@@ -31,11 +31,18 @@ module.exports = (db, { now = Date.now } = {}) => {
     };
   }
 
+  // Un seul calcul en vol : à l'expiration du cache, les visites simultanées
+  // attendent le même trio de COUNT au lieu d'en relancer chacune.
+  let pending = null;
+  const refresh = () => {
+    pending = pending || compute()
+      .then((value) => { cached = value; cachedAt = now(); return value; })
+      .finally(() => { pending = null; });
+    return pending;
+  };
+
   router.get('/stats', asyncHandler(async (_req, res) => {
-    if (!cached || now() - cachedAt > TTL_MS) {
-      cached = await compute();
-      cachedAt = now();
-    }
+    if (!cached || now() - cachedAt > TTL_MS) await refresh();
     res.set('Cache-Control', 'public, max-age=600');
     res.json(cached);
   }));

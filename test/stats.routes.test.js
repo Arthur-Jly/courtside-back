@@ -1,5 +1,5 @@
 /**
- * Chiffres vitrine — BK-ST-01 / 02.
+ * Chiffres vitrine — BK-ST-01 à 03.
  */
 const { test } = require('node:test');
 const assert = require('node:assert');
@@ -51,5 +51,22 @@ test('BK-ST-02 cache de 10 min : pas de COUNT à chaque visite', async () => {
     t = 11 * 60 * 1000;
     await fetch(`${url}/api/stats`);
     assert.equal(d.calls.length, 6);
+  } finally { server.close(); }
+});
+
+test('BK-ST-03 visites simultanées à froid : un seul calcul en vol', async () => {
+  // Base lente : les COUNT ne répondent qu'une fois toutes les visites arrivées.
+  let release;
+  const gate = new Promise(r => { release = r; });
+  const calls = [];
+  const slowDb = { promise: () => ({ query: (sql) => { calls.push(sql); return gate.then(() => [[{ n: 150 }], []]); } }) };
+  const { server, url } = await listen(makeApp(slowDb));
+  try {
+    const visits = [1, 2, 3, 4, 5].map(() => fetch(`${url}/api/stats`).then(r => r.json()));
+    await new Promise(r => setTimeout(r, 100));
+    release();
+    const all = await Promise.all(visits);
+    assert.equal(calls.length, 3, 'trois COUNT, pas quinze');
+    for (const body of all) assert.deepEqual(body, { players: 150, places: 150, clubs: 150 });
   } finally { server.close(); }
 });
