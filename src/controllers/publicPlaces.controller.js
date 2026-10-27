@@ -91,13 +91,35 @@ class PublicPlacesController {
    * `coverage` (services/placeCoverage) charge à la demande les terrains d'une
    * zone jamais interrogée ; `verification` (services/placeVerification) les
    * recoupe avec la BD TOPO de l'IGN ; `osmQueue` (services/osmQueue) recoupe
-   * avec OSM en arrière-plan. Absents -> la recherche ne lit que la base.
+   * avec OSM en arrière-plan ; `cityLocator` (services/cityLocator) donne le
+   * centre d'une ville pour qu'une recherche par ville seule fasse de même.
+   * Absents -> la recherche ne lit que la base.
    */
-  constructor(db, { coverage, verification, osmQueue } = {}) {
+  constructor(db, { coverage, verification, osmQueue, cityLocator } = {}) {
     this.db = db;
     this.coverage = coverage || null;
     this.verification = verification || null;
     this.osmQueue = osmQueue || null;
+    this.cityLocator = cityLocator || null;
+  }
+
+  /**
+   * Prépare la zone avant de lire la base. Recherche par ville sans
+   * coordonnées : la zone est celle de la commune, mais le filtre reste la
+   * ville (les résultats ne changent pas de forme, ils existent simplement).
+   */
+  async _prepareArea({ city, lat, lng, hasGeo, radius }) {
+    let area = hasGeo ? { lat, lng, radiusKm: radius } : null;
+    if (!area && city && this.cityLocator) area = await this.cityLocator.locate(city);
+    if (!area) return;
+    // Zone jamais vue : on la charge depuis Data ES avant de répondre, pour que
+    // n'importe quelle commune de France donne des résultats.
+    if (this.coverage) await this.coverage.ensure(area.lat, area.lng, area.radiusKm);
+    // Puis recoupement IGN des terrains de la zone pas encore vérifiés. Sur une
+    // zone déjà vérifiée : une requête SQL, aucun appel sortant.
+    if (this.verification) await this.verification.verifyArea(area.lat, area.lng, area.radiusKm);
+    // OSM : jamais attendu (Overpass est lent) — la zone part en file d'attente.
+    if (this.osmQueue) this.osmQueue.enqueueArea(area.lat, area.lng, area.radiusKm);
   }
 
   /**
@@ -112,14 +134,7 @@ class PublicPlacesController {
     const radius = Number.isFinite(Number(filters.radius)) ? Number(filters.radius) : RADIUS_DEFAULT_KM;
     const limit = Math.min(Math.max(parseInt(filters.limit, 10) || SEARCH_LIMIT_DEFAULT, 1), SEARCH_LIMIT_MAX);
 
-    // Zone jamais vue : on la charge depuis Data ES avant de répondre, pour que
-    // n'importe quelle commune de France donne des résultats.
-    if (hasGeo && this.coverage) await this.coverage.ensure(lat, lng, radius);
-    // Puis recoupement IGN des terrains de la zone pas encore vérifiés. Sur une
-    // zone déjà vérifiée : une requête SQL, aucun appel sortant.
-    if (hasGeo && this.verification) await this.verification.verifyArea(lat, lng, radius);
-    // OSM : jamais attendu (Overpass est lent) — la zone part en file d'attente.
-    if (hasGeo && this.osmQueue) this.osmQueue.enqueueArea(lat, lng, radius);
+    await this._prepareArea({ city, lat, lng, hasGeo, radius });
 
     const { where, params: whereParams } = this._filters({ city, sport, q, lat, lng, hasGeo, radius });
 

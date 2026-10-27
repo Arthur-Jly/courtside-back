@@ -148,8 +148,13 @@ const placeVerification = process.env.PLACES_VERIFY === 'false'
 const placeOsmQueue = process.env.PLACES_OSM === 'false'
   ? null
   : require('./services/osmQueue').createOsmQueue(db);
+// Recherche par ville seule : centre de la commune (geo.api.gouv.fr) pour que
+// la zone soit chargée et vérifiée comme une recherche géographique.
+const cityLocator = placeCoverage || placeVerification
+  ? require('./services/cityLocator').createCityLocator()
+  : null;
 const publicPlacesRouter = require('./routes/publicPlaces')(db, {
-  coverage: placeCoverage, verification: placeVerification, osmQueue: placeOsmQueue,
+  coverage: placeCoverage, verification: placeVerification, osmQueue: placeOsmQueue, cityLocator,
 });
 const pushRouter = require('./routes/push')(db);
 const notificationsRouter = require('./routes/notifications')(db);

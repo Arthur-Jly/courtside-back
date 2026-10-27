@@ -214,3 +214,35 @@ test('BK-PP-36 lecture Data ES tronquée (zone trop dense) : on ne masque rien',
   assert.equal(await coverage.ensure(48.85, 2.35), 'fetched');
   assert.equal(callsTo(db, /SET source_missing_at = NOW\(\)/).length, 0);
 });
+
+test('BK-PC-11 GET /public-places?city= sans coordonnées : zone de la commune chargée, vérifiée et mise en file OSM ; filtre ville conservé', async () => {
+  const db = fakeDb([[/FROM public_places p/, () => []]]);
+  const seen = { ensure: [], verify: [], osm: [], located: [] };
+  const deps = {
+    coverage: { ensure: async (...a) => { seen.ensure.push(a); return 'fetched'; } },
+    verification: { verifyArea: async (...a) => { seen.verify.push(a); return 'verified'; } },
+    osmQueue: { enqueueArea: (...a) => { seen.osm.push(a); } },
+    cityLocator: { locate: async (c) => { seen.located.push(c); return c === 'Grenoble' ? { lat: 45.18, lng: 5.72, radiusKm: 6 } : null; } },
+  };
+  const app = express();
+  app.use(express.json());
+  app.use('/api', publicPlacesRouter(db, deps));
+  app.use(errorHandler);
+  const { server, url } = await listen(app);
+  try {
+    const res = await fetch(`${url}/api/public-places?city=Grenoble`);
+    assert.equal(res.status, 200);
+    assert.deepEqual(seen.ensure, [[45.18, 5.72, 6]]);
+    assert.deepEqual(seen.verify, [[45.18, 5.72, 6]]);
+    assert.deepEqual(seen.osm, [[45.18, 5.72, 6]]);
+    const search = db.calls.find(c => /FROM public_places p/.test(c.sql) && /LIMIT \?/.test(c.sql));
+    assert.match(search.sql, /LOWER\(p\.city\) = LOWER\(\?\)/);
+    assert.doesNotMatch(search.sql, /distance_km/, 'la recherche reste une recherche par ville');
+
+    await fetch(`${url}/api/public-places?city=Nullepart`);
+    assert.equal(seen.ensure.length, 1, 'ville introuvable : rien de chargé, la base répond');
+
+    await fetch(`${url}/api/public-places?lat=48.85&lng=2.35&radius=5&city=Paris`);
+    assert.ok(!seen.located.includes('Paris'), 'avec coordonnées, la ville n’est pas résolue');
+  } finally { server.close(); }
+});
