@@ -160,6 +160,7 @@ const pushRouter = require('./routes/push')(db);
 const notificationsRouter = require('./routes/notifications')(db);
 const realtimeRouter = require('./routes/realtime')();
 const newsletterRouter = require('./routes/newsletter')(db);
+const statsRouter = require('./routes/stats')(db);
 const paymentsRouter = paymentsModule(db);
 
 const CronService = require('./services/cronService');
@@ -186,6 +187,7 @@ app.use('/api', pushRouter);
 app.use('/api', notificationsRouter);
 app.use('/api', realtimeRouter);
 app.use('/api', newsletterRouter);
+app.use('/api', statsRouter);
 app.use('/api', adminRouter);
 app.use('/api', paymentsRouter);
 
