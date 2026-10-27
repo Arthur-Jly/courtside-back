@@ -117,6 +117,7 @@ function profileDb(isPublic) {
     [/SELECT \* FROM user_profiles/, () => [{
       user_id: 5, bio: 'bio-secrete', city: 'Lyon', birthdate: '1990-01-01', sports: 'foot', is_public: isPublic,
     }]],
+    [/FROM user_sport_levels/, () => [{ sport: 'foot', level: 'confirme' }]],
   ]);
 }
 

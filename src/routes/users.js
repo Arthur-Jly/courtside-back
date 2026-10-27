@@ -23,6 +23,7 @@ module.exports = (db) => {
 
     const [user] = await grab('SELECT id, name, email, username, role, created_at FROM users WHERE id = ?', [userId]);
     const profile = await grab('SELECT bio, city, birthdate, sports, is_public FROM user_profiles WHERE user_id = ?', [userId]);
+    const sportLevels = await grab('SELECT sport, level, updated_at FROM user_sport_levels WHERE user_id = ?', [userId]);
     const reservations = await grab('SELECT id, terrain_id, start_time, end_time, price, status, created_at FROM reservations WHERE user_id = ?', [userId]);
     const favorites = await grab('SELECT terrain_id, created_at FROM favorites WHERE user_id = ?', [userId]);
     const friends = await grab('SELECT user_id_1, user_id_2, status FROM amis WHERE user_id_1 = ? OR user_id_2 = ?', [userId, userId]);
@@ -35,6 +36,7 @@ module.exports = (db) => {
       exported_at: new Date().toISOString(),
       user: user || null,
       profile: profile[0] || null,
+      sport_levels: sportLevels,
       reservations, favorites, friends, announcements, messages, notifications,
     });
   }));
@@ -119,9 +121,30 @@ module.exports = (db) => {
     if (!profile || (!isPublic && !isSelf)) {
       return res.json({ profile: { user_id: id, is_public: false, user_name: user.name, username: user.username } });
     }
+    const sportLevels = await queryPromise(db,
+      'SELECT sport, level FROM user_sport_levels WHERE user_id = ? ORDER BY sport', [id]);
     res.json({
-      profile: { ...profile, is_public: isPublic, user_name: user.name, username: user.username },
+      profile: { ...profile, is_public: isPublic, user_name: user.name, username: user.username, sport_levels: sportLevels },
     });
+  }));
+
+  // Niveau déclaré par sport. Le corps remplace l'ensemble : upsert des sports
+  // reçus, puis retrait des autres (deux requêtes idempotentes, pas de transaction).
+  router.put('/users/me/sport-levels', requireAuth, validate(schemas.sportLevels), asyncHandler(async (req, res) => {
+    const userId = req.user.id;
+    const { levels } = req.body;
+    if (levels.length > 0) {
+      await queryPromise(db,
+        `INSERT INTO user_sport_levels (user_id, sport, level) VALUES ${levels.map(() => '(?, ?, ?)').join(', ')}
+         ON DUPLICATE KEY UPDATE level = VALUES(level)`,
+        levels.flatMap(l => [userId, l.sport, l.level]));
+      await queryPromise(db,
+        `DELETE FROM user_sport_levels WHERE user_id = ? AND sport NOT IN (${levels.map(() => '?').join(', ')})`,
+        [userId, ...levels.map(l => l.sport)]);
+    } else {
+      await queryPromise(db, 'DELETE FROM user_sport_levels WHERE user_id = ?', [userId]);
+    }
+    res.json({ levels: levels.map(({ sport, level }) => ({ sport, level })) });
   }));
 
   router.put('/users/:id/profile', requireAuth, validate(schemas.profileUpdate), asyncHandler(async (req, res) => {

@@ -18,6 +18,9 @@ const validate = (schema, source = 'body') => {
 const id = Joi.number().integer().positive();
 const safeStr = (min, max) => Joi.string().trim().min(min).max(max);
 
+// Niveau déclaré par sport (table user_sport_levels), du plus faible au plus fort.
+const PLAYER_LEVELS = ['debutant', 'intermediaire', 'confirme', 'competition'];
+
 // At least 8 chars, with a letter and a digit. Disallow common-leak placeholders.
 const password = Joi.string()
   .min(8)
@@ -181,6 +184,14 @@ const schemas = {
       Joi.array().items(Joi.string().max(50)).max(20),
     ).optional(),
     is_public: Joi.boolean().optional(),
+  }),
+
+  // Remplace l'ensemble des niveaux du joueur : un sport absent de la liste est retiré.
+  sportLevels: Joi.object({
+    levels: Joi.array().items(Joi.object({
+      sport: Joi.string().pattern(/^[a-z0-9_-]{1,20}$/).required(),
+      level: Joi.string().valid(...PLAYER_LEVELS).required(),
+    })).max(20).unique('sport').required(),
   }),
 
   userUpdate: Joi.object({

@@ -31,6 +31,7 @@ async function anonymizeAccount(db, userId) {
   await purge('DELETE FROM notifications WHERE user_id = ?', [userId]);
   await purge('DELETE FROM push_subscriptions WHERE user_id = ?', [userId]);
   await purge('DELETE FROM user_profiles WHERE user_id = ?', [userId]);
+  await purge('DELETE FROM user_sport_levels WHERE user_id = ?', [userId]);
   await purge('DELETE FROM player_ratings WHERE rater_id = ? OR rated_user_id = ?', [userId, userId]);
 
   // 2. Réservations futures annulées, créneaux rendus au club.

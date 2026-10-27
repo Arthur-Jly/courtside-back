@@ -1,4 +1,4 @@
-const { test } = require('node:test');
+const { test, afterEach } = require('node:test');
 const assert = require('node:assert');
 const express = require('express');
 const jwt = require('jsonwebtoken');
@@ -9,6 +9,12 @@ const { fakeDb } = require('./helpers/fakeDb');
 const { listen } = require('./helpers/testServer');
 const usersRouter = require('../src/routes/users');
 const { errorHandler } = require('../src/middleware/errorHandler');
+const tokenRevocation = require('../src/services/tokenRevocation');
+
+// BK-RGPD-01 anonymise le user 31, ce qui révoque ses jetons. TOKEN est signé au
+// chargement du fichier : si une seconde s'écoule avant la révocation, les tests
+// suivants recevaient un 401 au hasard.
+afterEach(() => tokenRevocation.reset());
 
 const TOKEN = jwt.sign({ id: 31, role: 'player' }, process.env.JWT_SECRET, { expiresIn: '5m' });
 const AUTH = { Authorization: `Bearer ${TOKEN}` };
